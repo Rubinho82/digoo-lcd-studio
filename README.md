@@ -1,11 +1,52 @@
-# Digoo LCD Studio
+# Digoo LCD Studio — software para water cooler Digoo com tela LCD
 
-Software livre para a **telinha LCD de watercoolers** que usam o painel **HONGTAI / LOVINGCOOL "MONITOR"**
-(USB `33c3:7791`, também `7788`/`7792`) — vendido com várias marcas (Digoo, LovingCool, Delta…). Feito porque o
-cooler vem sem programa (ou com um programa fraco). Windows 10/11.
+**Programa grátis para a telinha do water cooler Digoo** (e de outros watercoolers com tela LCD que usam o painel
+**HONGTAI / LOVINGCOOL "MONITOR"**, USB `33c3:7791`, `7788` ou `7792`). O water cooler Digoo vem sem software, ou
+com um programa fraco; este aqui mostra a **temperatura da CPU e da GPU**, coloca **GIF, vídeo e foto** na tela,
+puxa wallpapers do **Wallpaper Engine** e mostra a **música do Spotify/YouTube com a letra e a tradução**.
+Windows 10/11, código aberto (MIT).
 
-> *Free software for the LCD screen on AIO coolers using the HONGTAI/LOVINGCOOL panel (USB 33c3:7791).
-> Sensor dashboards, GIFs/videos, Wallpaper Engine Workshop, music visualizer. UI in Portuguese.*
+**[⬇ Baixar a última versão (Windows)](https://github.com/Rubinho82/digoo-lcd-studio/releases/latest)** ·
+[Site do projeto](https://rubinho82.github.io/digoo-lcd-studio/)
+
+![Telinha do water cooler Digoo com os temas do Digoo LCD Studio](docs/img/destaque.jpg)
+
+> **English:** free **Digoo water cooler software** for the AIO's LCD screen (HONGTAI/LOVINGCOOL panel, USB
+> 33c3:7791). Shows CPU/GPU temperature, plays GIFs and videos, Wallpaper Engine Workshop, Spotify/YouTube
+> "now playing" with synced lyrics and translation. Windows 10/11. The interface is in Portuguese.
+
+## Como usar
+
+1. Baixe o zip em **[Releases](https://github.com/Rubinho82/digoo-lcd-studio/releases/latest)** e extraia em
+   qualquer pasta.
+2. Abra o **DigooLCD.exe** com o water cooler ligado no USB. A tela é achada sozinha.
+3. Escolha um tema na aba **Temas**. Para ver a temperatura da CPU, instale o driver grátis **PawnIO** pelo botão
+   na aba **Sensores**.
+
+Não precisa instalar Python nem nada. Para abrir junto com o Windows, marque "Iniciar junto com o Windows" na aba Configurações.
+
+## Dúvidas comuns
+
+**Meu water cooler Digoo veio sem software. Esse serve?** Serve se a tela aparecer no Gerenciador de Dispositivos
+como porta COM com o ID `33c3:7791` (ou `7788`/`7792`). É o painel HONGTAI que vem nos watercoolers Digoo,
+LovingCool e de outras marcas.
+
+**A tela voltou para a imagem de fábrica.** Isso acontece quando nenhum programa está mandando imagem. Deixe o
+Digoo LCD Studio aberto (ele fica na bandeja, perto do relógio) ou ative o início com o Windows.
+
+**Não aparece a temperatura da CPU.** Instale o PawnIO pela aba Sensores (é o driver que o LibreHardwareMonitor
+usa para ler a CPU).
+
+**Dá para colocar GIF ou vídeo?** Sim: arraste o arquivo para a janela do programa ou procure na aba Biblioteca (GIPHY, anime,
+Workshop do Wallpaper Engine). Dá para deixar a temperatura por cima do vídeo.
+
+**Como pôr a letra da música?** Na aba Música, escolha o modelo *Letra (karaokê)*. A tradução liga na mesma aba.
+
+## Temas
+
+![20 temas de temperatura para a tela do water cooler](docs/img/temas.jpg)
+
+![14 modelos do tema Música, com letra e tradução](docs/img/musica.jpg)
 
 ## O que faz
 

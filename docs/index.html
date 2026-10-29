@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Software para Water Cooler Digoo (tela LCD) — grátis | Digoo LCD Studio</title>
+<meta name="description" content="Programa grátis para a tela LCD do water cooler Digoo: temperatura da CPU e GPU, GIFs, vídeos, Wallpaper Engine e música do Spotify/YouTube com letra e tradução. Windows 10/11, código aberto.">
+<meta name="keywords" content="software water cooler digoo, programa water cooler digoo, digoo water cooler software, digoo aio lcd software, watercooler com tela, tela lcd water cooler, hongtai lcd, lovingcool, temperatura cpu gpu na tela do cooler">
+<link rel="canonical" href="https://rubinho82.github.io/digoo-lcd-studio/">
+<meta name="theme-color" content="#0d1117">
+<meta property="og:type" content="website">
+<meta property="og:locale" content="pt_BR">
+<meta property="og:title" content="Software para Water Cooler Digoo (tela LCD) — grátis">
+<meta property="og:description" content="Temperatura da CPU/GPU, GIFs, vídeos, Wallpaper Engine e Spotify/YouTube com letra na telinha do water cooler Digoo.">
+<meta property="og:url" content="https://rubinho82.github.io/digoo-lcd-studio/">
+<meta property="og:image" content="https://rubinho82.github.io/digoo-lcd-studio/img/social.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Digoo LCD Studio",
+  "alternateName": ["Software para water cooler Digoo", "Digoo water cooler software"],
+  "description": "Software grátis para a tela LCD do water cooler Digoo e de watercoolers com o painel HONGTAI/LOVINGCOOL (USB 33c3:7791).",
+  "applicationCategory": "UtilitiesApplication",
+  "operatingSystem": "Windows 10, Windows 11",
+  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "BRL"},
+  "url": "https://rubinho82.github.io/digoo-lcd-studio/",
+  "downloadUrl": "https://github.com/Rubinho82/digoo-lcd-studio/releases/latest",
+  "image": "https://rubinho82.github.io/digoo-lcd-studio/img/social.png",
+  "license": "https://opensource.org/licenses/MIT"
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {"@type": "Question", "name": "Meu water cooler Digoo veio sem software. Esse programa serve?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Serve se a tela aparece no Gerenciador de Dispositivos como porta COM com o ID 33c3:7791 (ou 7788/7792). É o painel HONGTAI que vem nos watercoolers Digoo, LovingCool e de outras marcas."}},
+    {"@type": "Question", "name": "A tela do water cooler voltou para a imagem de fábrica. O que fazer?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Isso acontece quando nenhum programa está mandando imagem. Deixe o Digoo LCD Studio aberto (ele fica na bandeja) ou marque Iniciar junto com o Windows na aba Configurações."}},
+    {"@type": "Question", "name": "Por que não aparece a temperatura da CPU?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Instale o driver grátis PawnIO pelo botão na aba Sensores. É o driver que o LibreHardwareMonitor usa para ler a temperatura da CPU."}},
+    {"@type": "Question", "name": "Dá para colocar GIF ou vídeo na tela do water cooler?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Sim. Arraste o arquivo para a janela do programa ou procure na aba Biblioteca (GIPHY, anime e Workshop do Wallpaper Engine). Dá para deixar a temperatura por cima do vídeo."}},
+    {"@type": "Question", "name": "Mostra a música do Spotify e do YouTube?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Sim, com capa, título, tempo, ondas do som e a letra sincronizada no estilo karaokê, com tradução opcional."}}
+  ]
+}
+</script>
+<style>
+  :root {
+    --bg: #0d1117; --bg2: #161b22; --line: #30363d; --fg: #e6edf3; --muted: #8b949e;
+    --acc: #00e5ff; --acc2: #ff2e88;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  a { color: var(--acc); }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+  header { padding: 64px 0 32px; background:
+    radial-gradient(600px 300px at 0% 100%, rgba(0,229,255,.18), transparent),
+    radial-gradient(500px 300px at 100% 0%, rgba(255,46,136,.18), transparent); }
+  .kicker { color: var(--muted); font-size: 20px; margin: 0; }
+  h1 { font-size: clamp(34px, 6vw, 60px); line-height: 1.1; margin: 6px 0 12px; }
+  .sub { color: var(--acc); font-size: clamp(18px, 2.6vw, 24px); font-weight: 600; margin: 0 0 20px; }
+  .lead { max-width: 760px; font-size: 19px; }
+  .btns { display: flex; flex-wrap: wrap; gap: 12px; margin: 28px 0 8px; }
+  .btn { display: inline-block; padding: 14px 24px; border-radius: 10px; font-weight: 700; text-decoration: none; }
+  .btn.main { background: var(--acc); color: #001016; }
+  .btn.alt { border: 1px solid var(--line); color: var(--fg); background: var(--bg2); }
+  .small { color: var(--muted); font-size: 14px; }
+  img.full { width: 100%; height: auto; border-radius: 14px; display: block; }
+  section { padding: 36px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 28px; margin: 0 0 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .card { background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  .card h3 { margin: 0 0 6px; font-size: 18px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+  ol li { margin-bottom: 8px; }
+  details { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; margin-bottom: 10px; }
+  summary { cursor: pointer; font-weight: 600; }
+  details p { color: var(--muted); margin: 10px 0 0; }
+  code { background: var(--bg2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 15px; }
+  footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <p class="kicker">Software para o</p>
+    <h1>Water Cooler Digoo com tela LCD</h1>
+    <p class="sub">Programa grátis · Windows 10/11 · código aberto</p>
+    <p class="lead">O water cooler Digoo vem sem software para a telinha (ou com um programa fraco). O
+      <strong>Digoo LCD Studio</strong> mostra a <strong>temperatura da CPU e da GPU</strong>, coloca
+      <strong>GIF, vídeo e foto</strong> na tela, puxa wallpapers do <strong>Wallpaper Engine</strong> e mostra a
+      <strong>música do Spotify e do YouTube com a letra e a tradução</strong>.</p>
+    <div class="btns">
+      <a class="btn main" href="https://github.com/Rubinho82/digoo-lcd-studio/releases/latest">⬇ Baixar grátis para Windows</a>
+      <a class="btn alt" href="https://github.com/Rubinho82/digoo-lcd-studio">Ver o código no GitHub</a>
+    </div>
+    <p class="small">Funciona com watercoolers que usam o painel HONGTAI / LOVINGCOOL (USB <code>33c3:7791</code>,
+      <code>7788</code> ou <code>7792</code>) — Digoo, LovingCool e outras marcas.</p>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <img class="full" src="img/destaque.jpg" width="1600" height="440"
+         alt="Telinha do water cooler Digoo mostrando temperatura da CPU e GPU, música e letra">
+  </div>
+
+  <section>
+    <div class="wrap">
+      <h2>O que ele faz na tela do water cooler</h2>
+      <div class="grid">
+        <div class="card"><h3>20 temas de temperatura</h3><p>CPU, GPU, RAM, VRAM, rede, ventoinhas e bomba, em anéis, ponteiros, gráficos, lista, radar, vidro fosco, 8-bit e mais.</p></div>
+        <div class="card"><h3>GIF, vídeo e foto</h3><p>Playlist com velocidade ajustável. Vídeo roda leve, com cerca de 1% de processador.</p></div>
+        <div class="card"><h3>Wallpaper Engine</h3><p>Navega e baixa wallpapers do Workshop pela sua Steam, e mostra os que você já tem.</p></div>
+        <div class="card"><h3>Spotify e YouTube</h3><p>Capa, título, tempo e ondas do som. Letra sincronizada estilo karaokê, com tradução.</p></div>
+        <div class="card"><h3>Tema por cima do vídeo</h3><p>Deixe a temperatura por cima do GIF ou vídeo, com transparência ajustável.</p></div>
+        <div class="card"><h3>Leve e automático</h3><p>Fica na bandeja, abre com o Windows, modo noturno, brilho e controle da ventoinha da GPU.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Como usar</h2>
+      <ol>
+        <li>Baixe o zip em <a href="https://github.com/Rubinho82/digoo-lcd-studio/releases/latest">Releases</a> e extraia em qualquer pasta.</li>
+        <li>Abra o <strong>DigooLCD.exe</strong> com o water cooler ligado no USB. A tela é achada sozinha.</li>
+        <li>Escolha um tema na aba <strong>Temas</strong>. Para ver a temperatura da CPU, instale o driver grátis <strong>PawnIO</strong> pelo botão na aba <strong>Sensores</strong>.</li>
+      </ol>
+      <p class="small">Não precisa instalar Python nem nada. A interface é em português.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Temas</h2>
+      <img class="full" src="img/temas.jpg" loading="lazy" alt="20 temas de temperatura da CPU e GPU para a tela do water cooler Digoo">
+      <h2 style="margin-top:32px">Música, letra e tradução</h2>
+      <img class="full" src="img/musica.jpg" loading="lazy" alt="Modelos de música para a tela do water cooler: capa, vinil, karaokê, cassete e mais">
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Dúvidas comuns</h2>
+      <details><summary>Meu water cooler Digoo veio sem software. Esse programa serve?</summary>
+        <p>Serve se a tela aparece no Gerenciador de Dispositivos como porta COM com o ID <code>33c3:7791</code> (ou <code>7788</code>/<code>7792</code>). É o painel HONGTAI que vem nos watercoolers Digoo, LovingCool e de outras marcas.</p></details>
+      <details><summary>A tela do water cooler voltou para a imagem de fábrica. O que fazer?</summary>
+        <p>Isso acontece quando nenhum programa está mandando imagem. Deixe o Digoo LCD Studio aberto (ele fica na bandeja, perto do relógio) ou marque "Iniciar junto com o Windows" na aba Configurações.</p></details>
+      <details><summary>Por que não aparece a temperatura da CPU?</summary>
+        <p>Instale o driver grátis PawnIO pelo botão na aba Sensores. É o driver que o LibreHardwareMonitor usa para ler a temperatura da CPU.</p></details>
+      <details><summary>Dá para colocar GIF ou vídeo na tela do water cooler?</summary>
+        <p>Sim. Arraste o arquivo para a janela do programa ou procure na aba Biblioteca (GIPHY, anime e Workshop do Wallpaper Engine). Dá para deixar a temperatura por cima do vídeo.</p></details>
+      <details><summary>Mostra a música do Spotify e do YouTube?</summary>
+        <p>Sim, com capa, título, tempo, ondas do som e a letra sincronizada no estilo karaokê, com tradução opcional.</p></details>
+    </div>
+  </section>
+
+  <section lang="en">
+    <div class="wrap">
+      <h2>Digoo water cooler software (English)</h2>
+      <p>Free software for the LCD screen of the Digoo AIO water cooler and other coolers with the HONGTAI/LOVINGCOOL
+        panel (USB 33c3:7791). Shows CPU/GPU temperature, plays GIFs and videos, browses the Wallpaper Engine
+        Workshop and shows Spotify/YouTube "now playing" with synced lyrics and translation. Windows 10/11, open
+        source (MIT). The interface is in Portuguese.
+        <a href="https://github.com/Rubinho82/digoo-lcd-studio/releases/latest">Download for Windows</a>.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    Digoo LCD Studio é um projeto independente e de código aberto (licença MIT), sem ligação com Digoo, HONGTAI,
+    Valve ou Wallpaper Engine. · <a href="https://github.com/Rubinho82/digoo-lcd-studio">GitHub</a>
+  </div>
+</footer>
+</body>
+</html>
