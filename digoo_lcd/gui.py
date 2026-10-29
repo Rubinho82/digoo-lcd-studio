@@ -752,8 +752,40 @@ class MainWindow(QMainWindow):
         lr.addWidget(QLabel("adiantar"))
         lr.addWidget(self.lbl_lyr)
         fl.addRow("Acertar o tempo", lr)
+        from . import translate as tr_mod
+        self.chk_tr = QCheckBox("Traduzir a letra")
+        self.chk_tr.setChecked(self.cfg.lyrics_translate)
+        self.chk_tr.toggled.connect(lambda on: (self._set("lyrics_translate", on), self._sync_tr_widgets()))
+        fl.addRow("", self.chk_tr)
+        self.cb_tr_lang = QComboBox()
+        for k, label in tr_mod.LANGS.items():
+            self.cb_tr_lang.addItem(label, k)
+        self.cb_tr_lang.setCurrentIndex(max(0, self.cb_tr_lang.findData(self.cfg.lyrics_lang)))
+        self.cb_tr_lang.currentIndexChanged.connect(lambda _: self._set("lyrics_lang", self.cb_tr_lang.currentData()))
+        fl.addRow("Traduzir para", self.cb_tr_lang)
+        self.cb_tr_prov = QComboBox()
+        for k, label in tr_mod.PROVIDERS.items():
+            self.cb_tr_prov.addItem(label, k)
+        self.cb_tr_prov.setCurrentIndex(max(0, self.cb_tr_prov.findData(self.cfg.lyrics_provider)))
+        self.cb_tr_prov.currentIndexChanged.connect(
+            lambda _: (self._set("lyrics_provider", self.cb_tr_prov.currentData()), self._sync_tr_widgets()))
+        fl.addRow("Tradutor", self.cb_tr_prov)
+        self.ed_tr_key = QLineEdit()
+        self.ed_tr_key.setEchoMode(QLineEdit.Password)
+        self.ed_tr_key.editingFinished.connect(self._on_tr_key)
+        self.lbl_tr_key = QLabel("Chave")
+        fl.addRow(self.lbl_tr_key, self.ed_tr_key)
+        self.lbl_tr_hint = QLabel("", objectName="muted", wordWrap=True, openExternalLinks=True)
+        fl.addRow("", self.lbl_tr_hint)
+        self.cb_tr_show = QComboBox()
+        self.cb_tr_show.addItem("Original com a tradução embaixo", "ambos")
+        self.cb_tr_show.addItem("Só a tradução", "traducao")
+        self.cb_tr_show.setCurrentIndex(max(0, self.cb_tr_show.findData(self.cfg.lyrics_show)))
+        self.cb_tr_show.currentIndexChanged.connect(lambda _: self._set("lyrics_show", self.cb_tr_show.currentData()))
+        fl.addRow("Mostrar", self.cb_tr_show)
         self.lbl_lyr_state = QLabel("", objectName="muted", wordWrap=True)
         fl.addRow("", self.lbl_lyr_state)
+        self._sync_tr_widgets()
         v.addWidget(g)
 
         g = QGroupBox("Ondas do som")
@@ -829,6 +861,34 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(3000, self._refresh_music_thumbs)
         return self._scroll(inner)
 
+    def _sync_tr_widgets(self):
+        prov = self.cb_tr_prov.currentData()
+        on = self.chk_tr.isChecked()
+        for wdg in (self.cb_tr_lang, self.cb_tr_prov, self.cb_tr_show):
+            wdg.setEnabled(on)
+        need_key = prov in ("deepl", "claude")
+        self.ed_tr_key.setVisible(need_key)
+        self.lbl_tr_key.setVisible(need_key)
+        self.ed_tr_key.setEnabled(on)
+        self.ed_tr_key.setText(getattr(self.cfg, f"{prov}_key", "") if need_key else "")
+        self.ed_tr_key.setPlaceholderText({"deepl": "chave da API do DeepL (termina em :fx no plano grátis)",
+                                           "claude": "chave da API do Claude (começa com sk-ant-)"}.get(prov, ""))
+        self.lbl_tr_hint.setText({
+            "mymemory": "Funciona na hora, sem cadastro. Tem limite de uso por dia e a tradução é mais literal; "
+                        "para ficar bem traduzida use DeepL ou Claude.",
+            "deepl": 'Crie a chave grátis em <a href="https://www.deepl.com/pro-api">deepl.com/pro-api</a> '
+                     "(plano DeepL API Free). Tradução muito boa, 500 mil caracteres por mês (centenas de músicas).",
+            "claude": 'Crie a chave em <a href="https://console.anthropic.com/">console.anthropic.com</a> (precisa de '
+                      "créditos). Usa o modelo Claude Opus 5.5: traduz o sentido, gíria e duplo sentido, não palavra "
+                      "por palavra. Custa alguns centavos por música, e cada música só é traduzida uma vez.",
+        }.get(prov, ""))
+        self.lbl_tr_hint.setVisible(on)
+
+    def _on_tr_key(self):
+        prov = self.cb_tr_prov.currentData()
+        if prov in ("deepl", "claude"):
+            self._set(f"{prov}_key", self.ed_tr_key.text().strip())
+
     def _demo_music(self):
         """Música e som de exemplo para as miniaturas quando nada está tocando."""
         import math as _m
@@ -899,6 +959,13 @@ class MainWindow(QMainWindow):
                 "instrumental": "Esta música é instrumental.",
                 "desligado": "Busca de letras desligada.",
             }.get(lyr.state if lyr else None, ""))
+            if lyr is not None and lyr.state == "ok" and self.cfg.lyrics_translate:
+                from . import translate as tr_mod
+                t = tr_mod.for_lyrics(lyr, m, self.cfg)
+                if t is not None:
+                    self.lbl_lyr_state.setText(self.lbl_lyr_state.text() + "  Tradução: " + {
+                        "traduzindo": "traduzindo…", "ok": "pronta.", "mesma": "a música já está nesse idioma.",
+                    }.get(t.state, t.msg or "falhou."))
         a = self.hub.audio_snapshot()
         if not self.hub.want_audio:
             self.lbl_audio.setText("Captura do som: desligada (liga sozinha quando você usa ondas, o tema Música "

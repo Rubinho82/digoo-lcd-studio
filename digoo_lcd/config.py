@@ -114,6 +114,12 @@ class Config:
     music_bg_opacity: int = 60      # fundo do tema Música e do cartão: 0 = transparente, 100 = sólido
     music_lyrics: bool = True       # buscar letra sincronizada (LRCLIB) para os modelos de letra
     lyrics_offset: float = 0.0      # segundos; positivo = letra adiantada
+    lyrics_translate: bool = False  # traduzir a letra
+    lyrics_lang: str = "pt"         # idioma da tradução (translate.LANGS)
+    lyrics_provider: str = "mymemory"  # mymemory | deepl | claude
+    lyrics_show: str = "ambos"      # ambos (original + tradução) | traducao (só a tradução)
+    deepl_key: str = ""
+    claude_key: str = ""
 
     # Posição e tamanho das camadas (tema e música): padrao | auto | pilula | livre
     layout_mode: str = "padrao"

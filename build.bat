@@ -8,7 +8,7 @@ dotnet publish sensorhelper -c Release -o bin\sensorhelper --nologo || goto :err
 del /q bin\sensorhelper\*.pdb 2>nul
 
 echo [2/3] Conferindo dependencias Python...
-python -c "import PySide6, PIL, serial, psutil, mss, av, numpy, PyInstaller" 2>nul || python -m pip install -q -r requirements.txt pyinstaller || goto :erro
+python -c "import PySide6, PIL, serial, psutil, mss, av, numpy, anthropic, certifi, PyInstaller" 2>nul || python -m pip install -q -r requirements.txt pyinstaller || goto :erro
 
 echo [3/3] Empacotando o programa...
 rem sem --uac-admin: o atalho abre sem UAC e chama o app aberto (ou a tarefa de boot, que ja e admin)
@@ -30,6 +30,7 @@ python -m PyInstaller --noconfirm --clean --windowed ^
   --exclude-module urllib3 --exclude-module jsonschema --exclude-module rich --exclude-module lark --exclude-module regex ^
   --exclude-module jinja2 --exclude-module pydot --exclude-module pyparsing --exclude-module yaml --exclude-module arrow ^
   --exclude-module pyreadline3 --exclude-module curses --exclude-module pydoc ^
+  --exclude-module sentry_sdk --exclude-module opentelemetry.sdk ^
   DigooLCD.pyw || goto :erro
 
 echo.

@@ -19,6 +19,7 @@ cooler vem sem programa (ou com um programa fraco). Windows 10/11.
 | **Camadas** | mover e redimensionar o tema e a música (arrastar na prévia, rodinha = tamanho) ou modos prontos: encaixe automático, música em pílula |
 | **Música** | "tocando agora" do Windows (Spotify, YouTube no navegador…) com capa, título e tempo + ondas do som do PC (sem microfone); 14 modelos: Capa central, Disco de vinil, Cartão, Minimalista, Espectro gigante, Onda neon, **Letra (karaokê)**, **Letra sobre a capa**, Polaroide, Rádio antigo, Fita cassete, Aparelho de som (LEDs), Videogame 8-bit, Ondas suaves; cores automáticas da capa |
 | **Letras sincronizadas** | a letra da música que está tocando, linha por linha no tempo certo (karaokê), buscada na [LRCLIB](https://lrclib.net) (grátis, sem cadastro) e guardada em cache; funciona no Spotify e em clipes do YouTube (o título "Artista - Música (Official Video)" é limpo sozinho); ajuste fino de ±5 s |
+| **Tradução da letra** | a tradução aparece embaixo de cada linha (ou só a tradução), para português, inglês, espanhol, francês, italiano, alemão, japonês ou coreano; tradutores: MyMemory (grátis, sem cadastro, limite diário), DeepL (chave grátis, muito boa) ou Claude (IA, chave paga, a mais natural — traduz sentido e gíria); cada música é traduzida uma vez e fica em cache |
 | **Espelhar tela** | um monitor inteiro ou uma região |
 | **Sensores** | CPU, GPU (NVIDIA/AMD/Intel), RAM, VRAM, SSDs, rede, ventoinhas — via LibreHardwareMonitor; ventoinha da GPU controlável (volta ao automático ao sair, 100% se passar de 83 °C) |
 | **Sistema** | bandeja, início com o Windows sem UAC (tarefa agendada), modo noturno, brilho por software, reconexão automática |
@@ -28,7 +29,7 @@ A temperatura da CPU e as ventoinhas da placa-mãe precisam do driver gratuito
 
 ## Instalar / compilar
 
-Precisa de **Python 3.10+**, **.NET SDK 8** e as libs do `requirements.txt`:
+Precisa de **Python 3.10+**, **.NET SDK 8** e as libs do `requirements.txt`. As chaves do DeepL/Claude ficam só no seu PC (`%APPDATA%\DigooLCD\config.json`).
 
 ```bash
 build.bat
@@ -46,6 +47,8 @@ Diagnóstico: `DigooLCD.exe --diagnostico` (grava `%APPDATA%\DigooLCD\diagnostic
 | `digoo_lcd/render.py` / `themes_extra.py` / `themes_display.py` | temas do painel (e camadas transparentes) |
 | `digoo_lcd/music.py` / `music_extra.py` | espectro, "tocando agora" e modelos do tema Música |
 | `digoo_lcd/lyrics.py` | letras sincronizadas (LRCLIB) |
+| `digoo_lcd/translate.py` | tradução das letras (MyMemory, DeepL, Claude) |
+| `digoo_lcd/textdraw.py` | texto com fonte reserva do Windows (♪, japonês, coreano, emoji…) |
 | `digoo_lcd/sources.py` / `videocache.py` | playlist, espelho, quadros prontos em cache |
 | `digoo_lcd/library.py` / `steam_ws.py` | biblioteca online e Workshop do Wallpaper Engine |
 | `digoo_lcd/gui.py` / `gui_library.py` | interface (PySide6) |

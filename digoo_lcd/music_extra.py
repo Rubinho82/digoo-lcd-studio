@@ -7,7 +7,7 @@ import time
 
 from PIL import Image
 
-from . import lyrics, music
+from . import lyrics, music, translate
 from .music import H, W, _ellipsize, _round_mask, draw_bars, draw_spectrum, fmt_time
 from .render import font, mix
 from .textdraw import Draw
@@ -66,18 +66,43 @@ def _sweep(x, cx, y, text, size, frac, hi, anchor="mm"):
 
 
 def _lyr_state(x):
-    """(letra, posição) ou (None, mensagem) quando não dá para mostrar."""
+    """(letra, posição, tradução) ou (None, mensagem, None) quando não dá para mostrar."""
     if not x.has:
-        return None, "Toque uma música no Spotify ou YouTube"
+        return None, "Toque uma música no Spotify ou YouTube", None
     lyr = lyrics.for_media(x.media, x.cfg)
     if lyr is None:
-        return None, ""
+        return None, "", None
     msg = {"buscando": "Procurando a letra…", "sem": "Letra não encontrada",
            "instrumental": "♪  Instrumental  ♪", "desligado": "Letras desligadas na aba Música"}.get(lyr.state)
     if msg or not lyr.lines:
-        return None, msg or "Letra não encontrada"
+        return None, msg or "Letra não encontrada", None
     pos = float(x.media.get("position") or 0) + float(getattr(x.cfg, "lyrics_offset", 0.0) or 0.0)
-    return lyr, pos
+    tr = translate.for_lyrics(lyr, x.media, x.cfg)
+    if tr is not None and (tr.state != "ok" or len(tr.lines) != len(lyr.lines)):
+        tr = None  # traduzindo, já está no idioma ou deu erro: mostra só o original
+    return lyr, pos, tr
+
+
+class _Lines:
+    """Que texto vai em cada linha: original, tradução embaixo, ou só a tradução."""
+
+    def __init__(self, x, lyr, tr):
+        self.lyr, self.tr = lyr, tr
+        self.only_tr = tr is not None and getattr(x.cfg, "lyrics_show", "ambos") == "traducao"
+        self.both = tr is not None and not self.only_tr
+
+    def main(self, k):
+        if k == -1:
+            return "♪"
+        txt = _line_text(self.lyr, k)
+        if self.only_tr and 0 <= k < len(self.lyr.lines) and self.lyr.lines[k][1].strip():
+            return self.tr.lines[k] or txt
+        return txt
+
+    def sub(self, k):
+        if not self.both or not (0 <= k < len(self.lyr.lines)):
+            return ""
+        return self.tr.lines[k] if self.tr.lines[k] != self.lyr.lines[k][1].strip() else ""
 
 
 def _ease(since: float, synced: bool) -> float:
@@ -110,36 +135,39 @@ def _layout_letra(x):
     """Karaokê: a linha atual grande, pintando conforme é cantada; as próximas embaixo."""
     c = x.c
     _header(x)
-    lyr, pos = _lyr_state(x)
-    top, bottom, cy, gap = 100, 424, 250, 72
+    lyr, pos, tr = _lyr_state(x)
+    top, bottom, cy, step = 96, 428, 252, 56
     if lyr is None:
         x.T((240, cy), pos, 26, c.muted, 600, max_w=W - 40)
     else:
         dur = float(x.media.get("duration") or 0)
         i, frac, since = lyr.at(pos, dur)
-        shift = (1 - _ease(since, lyr.synced)) * gap
-        fcur = c.f(32, 700)
-        for k in range(i - 2, i + 4):
-            y = cy + (k - i) * gap + shift
-            if y < top or y > bottom:
-                continue
-            txt = _line_text(lyr, k) if k >= 0 else ("♪" if k == -1 else "")
-            if not txt:
-                continue
-            if k == i or (i < 0 and k == -1):
-                lines = _wrap(c.d, txt, fcur, W - 40, 2)
-                fr = frac if lyr.synced else 0.0
-                total = sum(len(s) for s in lines) or 1
-                done = 0
-                for n, ln in enumerate(lines):
-                    yy = y + (n - (len(lines) - 1) / 2) * 38
-                    _text(x, (240, yy), ln, 32, c.txt, 255)
-                    _sweep(x, 240, yy, ln, 32, (fr * total - done) / max(1, len(ln)), c.acc)
-                    done += len(ln)
-            else:
-                dist = abs(k - i)
-                a = 170 if dist == 1 else 95
-                _text(x, (240, y), _ellipsize(c.d, txt, c.f(24, 600), W - 40), 24, c.txt, a, 600)
+        cur = i if i >= 0 else -1
+        L = _Lines(x, lyr, tr)
+        cur_lines = _wrap(c.d, L.main(cur), c.f(32, 700), W - 40, 2)
+        sub = L.sub(cur)
+        sub_lines = _wrap(c.d, sub, c.f(22, 600), W - 40, 2) if sub else []
+        h_cur = 38 * len(cur_lines) + (8 + 28 * len(sub_lines) if sub_lines else 0)
+        y0 = cy - h_cur / 2 + (1 - _ease(since, lyr.synced)) * step  # sobe quando troca de linha
+        fr = frac if lyr.synced else 0.0
+        total = sum(len(s) for s in cur_lines) or 1
+        done, yy = 0, y0 + 19
+        for ln in cur_lines:
+            _text(x, (240, yy), ln, 32, c.txt, 255)
+            _sweep(x, 240, yy, ln, 32, (fr * total - done) / max(1, len(ln)), c.acc)
+            done += len(ln)
+            yy += 38
+        yy += 8 - 19 + 14
+        tcol = mix(c.acc2, c.txt, 0.3)
+        for ln in sub_lines:  # tradução da linha atual, embaixo dela
+            _text(x, (240, yy), ln, 22, tcol, 235, 600)
+            yy += 28
+        for d in (1, 2, 3):  # linhas vizinhas, mais apagadas quanto mais longe
+            for k, y in ((cur - d, y0 - 30 - (d - 1) * step), (cur + d, y0 + h_cur + 30 + (d - 1) * step)):
+                txt = L.main(k) if k >= 0 else ""
+                if txt and top <= y <= bottom:
+                    _text(x, (240, y), _ellipsize(c.d, txt, c.f(24, 600), W - 40), 24, c.txt,
+                          170 if d == 1 else 95, 600)
     x.progress(40, W - 40, 440, times=False)
     if x.viz is not None and x.wave != "off":
         draw_bars(c, x.viz, 450, 476, "barras" if x.wave == "circulo" else x.wave, 200, 40, W - 40)
@@ -149,21 +177,24 @@ def _layout_letra_capa(x):
     """Letra grande alinhada à esquerda sobre a capa desfocada, rolando sozinha."""
     c = x.c
     c.d.rectangle([0, 0, W, H], fill=(0, 0, 0, int(80 * x.op)))
-    lyr, pos = _lyr_state(x)
+    lyr, pos, tr = _lyr_state(x)
     if lyr is None:
         x.T((240, 200), pos, 28, c.txt, 700, max_w=W - 40)
     else:
         dur = float(x.media.get("duration") or 0)
         i, frac, since = lyr.at(pos, dur)
-        fb = c.f(34, 700)
-        blocks = {}
+        L = _Lines(x, lyr, tr)
+        fb, ft = c.f(34, 700), c.f(24, 600)
+        blocks, subs = {}, {}
         for k in range(max(-1, i - 3), i + 6):
-            txt = _line_text(lyr, k) if k >= 0 else "♪"
+            txt = L.main(k)
             if txt:
                 blocks[k] = _wrap(c.d, txt, fb, W - 56, 3)
+                s = L.sub(k)
+                subs[k] = _wrap(c.d, s, ft, W - 56, 2) if s else []
 
         def height(k):
-            return len(blocks.get(k, [""])) * 40 + 22
+            return len(blocks.get(k, [""])) * 40 + len(subs.get(k, [])) * 30 + 22
 
         prev_h = height(i - 1) if (i - 1) in blocks else 0
         shift = (1 - _ease(since, lyr.synced)) * prev_h
@@ -190,6 +221,10 @@ def _layout_letra_capa(x):
                 if ly < 36 or ly > 384:
                     continue
                 _text(x, (28, ly), ln, 34, c.txt, 255 if cur else (110 if k < i else 85), anchor="lm")
+            for n, ln in enumerate(subs.get(k, [])):  # tradução embaixo de cada linha
+                ly = y0 + len(blocks[k]) * 40 + n * 30 + 14
+                if 36 <= ly <= 384:
+                    _text(x, (28, ly), ln, 24, mix(c.acc2, c.txt, 0.3), 225 if cur else 70, 600, anchor="lm")
     c.d.rectangle([0, 396, W, H], fill=(0, 0, 0, int(110 * x.op)))
     cov = x.cover(52)
     tx = 24
