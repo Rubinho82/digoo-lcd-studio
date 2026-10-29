@@ -1,0 +1,15 @@
+# compilação / empacotamento
+build/
+dist/
+bin/
+vendor/
+*.spec
+sensorhelper/bin/
+sensorhelper/obj/
+
+# Python
+__pycache__/
+*.pyc
+
+# logs locais
+*.log
