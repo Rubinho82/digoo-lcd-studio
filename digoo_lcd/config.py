@@ -111,7 +111,9 @@ class Config:
     music_show_app: bool = True
     music_show_clock: bool = False
     music_react: bool = True        # efeitos animados aceleram com o grave
-    music_bg_opacity: int = 60
+    music_bg_opacity: int = 60      # fundo do tema Música e do cartão: 0 = transparente, 100 = sólido
+    music_lyrics: bool = True       # buscar letra sincronizada (LRCLIB) para os modelos de letra
+    lyrics_offset: float = 0.0      # segundos; positivo = letra adiantada
 
     # Posição e tamanho das camadas (tema e música): padrao | auto | pilula | livre
     layout_mode: str = "padrao"
@@ -126,7 +128,7 @@ class Config:
     # Relógio / título / ventoinha
     clock_format: str = "hora"      # hora | hora_seg | data | data_hora | completo
     show_title: bool = True
-    gpu_fan: int = 0                # 0 = automático; 30..100 = % fixo      # fundo do tema Música e do cartão: 0 = transparente, 100 = sólido
+    gpu_fan: int = 0                # 0 = automático; 30..100 = % fixo
     media_speed: float = 1.0
 
     # Biblioteca online

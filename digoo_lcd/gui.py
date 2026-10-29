@@ -321,7 +321,7 @@ class MainWindow(QMainWindow):
             if key == self.cfg.theme:
                 it.setSelected(True)
         self.theme_list.itemClicked.connect(self._on_theme_clicked)
-        self.theme_list.setMinimumHeight(450)
+        self.theme_list.setMinimumHeight(660)
         v.addWidget(self.theme_list, 1)
 
         g = QGroupBox("O que aparece em cada quadro do tema \"Grade 6\"")
@@ -725,7 +725,7 @@ class MainWindow(QMainWindow):
         self.music_list.setGridSize(QSize(172, 190))
         self.music_list.setResizeMode(QListWidget.Adjust)
         self.music_list.setMovement(QListWidget.Static)
-        self.music_list.setFixedHeight(400)
+        self.music_list.setFixedHeight(590)
         for key, name in music.LAYOUTS.items():
             it = QListWidgetItem(name)
             it.setData(Qt.UserRole, key)
@@ -733,6 +733,27 @@ class MainWindow(QMainWindow):
             it.setSelected(key == self.cfg.music_layout)
         self.music_list.itemClicked.connect(self._on_music_layout)
         gl.addWidget(self.music_list)
+        v.addWidget(g)
+
+        g = QGroupBox("Letra da música (modelos \"Letra karaokê\" e \"Letra sobre a capa\")")
+        fl = QFormLayout(g)
+        self.chk_lyrics = QCheckBox("Buscar a letra sincronizada na internet (LRCLIB, grátis, sem cadastro)")
+        self.chk_lyrics.setChecked(self.cfg.music_lyrics)
+        self.chk_lyrics.toggled.connect(lambda on: self._set("music_lyrics", on))
+        fl.addRow("", self.chk_lyrics)
+        lr = QHBoxLayout()
+        self.sld_lyr = QSlider(Qt.Horizontal, minimum=-50, maximum=50, value=int(round(self.cfg.lyrics_offset * 10)))
+        self.lbl_lyr = QLabel(f"{self.cfg.lyrics_offset:+.1f} s")
+        self.lbl_lyr.setFixedWidth(52)
+        self.sld_lyr.valueChanged.connect(lambda val: (self.lbl_lyr.setText(f"{val / 10:+.1f} s"),
+                                                       self._set("lyrics_offset", val / 10)))
+        lr.addWidget(QLabel("atrasar"))
+        lr.addWidget(self.sld_lyr)
+        lr.addWidget(QLabel("adiantar"))
+        lr.addWidget(self.lbl_lyr)
+        fl.addRow("Acertar o tempo", lr)
+        self.lbl_lyr_state = QLabel("", objectName="muted", wordWrap=True)
+        fl.addRow("", self.lbl_lyr_state)
         v.addWidget(g)
 
         g = QGroupBox("Ondas do som")
@@ -817,7 +838,7 @@ class MainWindow(QMainWindow):
             from .library import LIB_DIR
             covers = sorted(LIB_DIR.glob("*.jpg")) + sorted(LIB_DIR.glob("*.png"))
             media = {"title": "Nome da música", "artist": "Artista", "status": "Playing", "app": "Spotify.exe",
-                     "position": 75, "duration": 200, "cover": str(covers[0]) if covers else ""}
+                     "position": 9, "duration": 200, "cover": str(covers[0]) if covers else "", "demo": True}
         viz = mus.AudioViz()
         viz.bands = [max(0.05, min(1.0, 0.85 - i * 0.012 + 0.25 * _m.sin(i / 3))) for i in range(viz.n)]
         viz.caps = [min(1.0, b + 0.06) for b in viz.bands]
@@ -865,6 +886,19 @@ class MainWindow(QMainWindow):
             self.lbl_now.setText(f"♫ {m['title']} — {m.get('artist') or m.get('album') or ''}   ({app}, {st}{tempo})")
         else:
             self.lbl_now.setText("Nada tocando agora. Dê play no Spotify, YouTube ou outro player.")
+        if hasattr(self, "lbl_lyr_state"):
+            from . import lyrics
+            lyr = lyrics.for_media(m, self.cfg) if self.cfg.music_layout.startswith("letra") else None
+            self.lbl_lyr_state.setText({
+                None: "Clipes do YouTube também funcionam (o título \"Artista - Música (Official Video)\" é limpo "
+                      "sozinho). Vídeos que não são música não têm letra.",
+                "buscando": "Procurando a letra desta música…",
+                "ok": "Letra encontrada" + (" com o tempo de cada linha." if lyr and lyr.synced else
+                                            " (sem tempo: rola pela duração da música)."),
+                "sem": "Não achei a letra desta música.",
+                "instrumental": "Esta música é instrumental.",
+                "desligado": "Busca de letras desligada.",
+            }.get(lyr.state if lyr else None, ""))
         a = self.hub.audio_snapshot()
         if not self.hub.want_audio:
             self.lbl_audio.setText("Captura do som: desligada (liga sozinha quando você usa ondas, o tema Música "

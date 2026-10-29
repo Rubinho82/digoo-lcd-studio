@@ -21,6 +21,7 @@ LAYOUTS = {
     "espectro": "Espectro gigante",
     "neon": "Onda neon",
 }
+ANIMATED = {"vinil"}  # modelos que se mexem sozinhos (o motor redesenha ~25x/s enquanto toca)
 WAVES = {"circulo": "Círculo", "barras": "Barras", "onda": "Onda", "espelho": "Barras espelhadas", "off": "Desligado"}
 
 
@@ -245,7 +246,7 @@ def draw_bars(c, viz: AudioViz, top: int = 330, bottom: int = 476, style: str = 
         c.line_aa([(x, bottom - (bottom - y) * 0.6) for x, y in pts], c.acc2, 2, max(0, alpha - 60))
         c.flush()
         return
-    gap = 3
+    gap = min(3.0, (x1 - x0) / n * 0.3)  # faixa estreita: barras mais juntas em vez de largura negativa
     bw = (x1 - x0 - gap * (n - 1)) / n
     espelho = style == "espelho"
     mid = (top + bottom) / 2 if espelho else bottom

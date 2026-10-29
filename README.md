@@ -11,13 +11,14 @@ cooler vem sem programa (ou com um programa fraco). Windows 10/11.
 
 | | |
 |---|---|
-| **Painel de sensores** | 12 temas: Anéis, Neon, Grade 6, Velocímetro, Gráficos, Minimalista, Relógio, Compacto, Terminal retrô, HUD cyberpunk, Barras verticais, Dígitos de LED |
+| **Painel de sensores** | 20 temas: Anéis, Neon, Grade 6, Velocímetro, Gráficos, Minimalista, Relógio, Compacto, Terminal retrô, HUD cyberpunk, Barras verticais, Dígitos de LED, Anel único (alterna CPU/GPU), Lista de sensores, Cartões com gráfico, Termômetros, Cronógrafo, Radar, Vidro fosco, RPG 8-bit |
 | **Personalizar** | cores (ou paletas prontas), 6 fontes, °C/°F, relógio (hora, segundos, data, dia da semana), título opcional, imagem de fundo |
 | **Fotos, GIFs e vídeos** | playlist com velocidade ajustável; vídeos/GIFs convertidos uma vez em quadros prontos (tocar ≈ 1% de CPU) |
 | **Biblioteca** | **Workshop do Wallpaper Engine** (navega, assina e baixa pela sua Steam, sem senha), GIPHY/Tenor (chave grátis), anime, Wikimedia; prévia animada antes de baixar; 8 efeitos animados gerados ao vivo |
 | **Tema por cima da mídia** | qualquer tema por cima do vídeo/foto, com transparência e escurecimento |
 | **Camadas** | mover e redimensionar o tema e a música (arrastar na prévia, rodinha = tamanho) ou modos prontos: encaixe automático, música em pílula |
-| **Música** | "tocando agora" do Windows (Spotify, YouTube no navegador…) com capa, título e tempo + ondas do som do PC (sem microfone); 8 modelos: Capa central, Disco de vinil, Cartão, Minimalista, Espectro gigante, Onda neon, Polaroide, Rádio antigo; cores automáticas da capa |
+| **Música** | "tocando agora" do Windows (Spotify, YouTube no navegador…) com capa, título e tempo + ondas do som do PC (sem microfone); 14 modelos: Capa central, Disco de vinil, Cartão, Minimalista, Espectro gigante, Onda neon, **Letra (karaokê)**, **Letra sobre a capa**, Polaroide, Rádio antigo, Fita cassete, Aparelho de som (LEDs), Videogame 8-bit, Ondas suaves; cores automáticas da capa |
+| **Letras sincronizadas** | a letra da música que está tocando, linha por linha no tempo certo (karaokê), buscada na [LRCLIB](https://lrclib.net) (grátis, sem cadastro) e guardada em cache; funciona no Spotify e em clipes do YouTube (o título "Artista - Música (Official Video)" é limpo sozinho); ajuste fino de ±5 s |
 | **Espelhar tela** | um monitor inteiro ou uma região |
 | **Sensores** | CPU, GPU (NVIDIA/AMD/Intel), RAM, VRAM, SSDs, rede, ventoinhas — via LibreHardwareMonitor; ventoinha da GPU controlável (volta ao automático ao sair, 100% se passar de 83 °C) |
 | **Sistema** | bandeja, início com o Windows sem UAC (tarefa agendada), modo noturno, brilho por software, reconexão automática |
@@ -42,8 +43,9 @@ Diagnóstico: `DigooLCD.exe --diagnostico` (grava `%APPDATA%\DigooLCD\diagnostic
 |---|---|
 | `digoo_lcd/protocol.py` | protocolo serial da tela |
 | `digoo_lcd/engine.py` | motor: conecta, desenha, camadas, envia, mantém a tela no modo ao vivo |
-| `digoo_lcd/render.py` / `themes_extra.py` | temas do painel (e camadas transparentes) |
-| `digoo_lcd/music.py` | espectro, "tocando agora" e modelos do tema Música |
+| `digoo_lcd/render.py` / `themes_extra.py` / `themes_display.py` | temas do painel (e camadas transparentes) |
+| `digoo_lcd/music.py` / `music_extra.py` | espectro, "tocando agora" e modelos do tema Música |
+| `digoo_lcd/lyrics.py` | letras sincronizadas (LRCLIB) |
 | `digoo_lcd/sources.py` / `videocache.py` | playlist, espelho, quadros prontos em cache |
 | `digoo_lcd/library.py` / `steam_ws.py` | biblioteca online e Workshop do Wallpaper Engine |
 | `digoo_lcd/gui.py` / `gui_library.py` | interface (PySide6) |
@@ -63,7 +65,7 @@ Diagnóstico: `DigooLCD.exe --diagnostico` (grava `%APPDATA%\DigooLCD\diagnostic
 
 Protocolo baseado na engenharia reversa de [GOG1071/hongtai-panel](https://github.com/GOG1071/hongtai-panel).
 Sensores: [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) (MPL-2.0).
-Áudio: [NAudio](https://github.com/naudio/NAudio). Fontes Orbitron, Rajdhani, Exo 2 e Share Tech Mono (SIL OFL).
+Áudio: [NAudio](https://github.com/naudio/NAudio). Letras: [LRCLIB](https://lrclib.net) (as letras não são distribuídas aqui; são buscadas na hora). Fontes Orbitron, Rajdhani, Exo 2 e Share Tech Mono (SIL OFL).
 O Workshop usa a `steam_api64.dll` da sua instalação do Wallpaper Engine (não é distribuída aqui).
 Projeto independente, sem ligação com Digoo, HONGTAI, Valve ou Wallpaper Engine.
 

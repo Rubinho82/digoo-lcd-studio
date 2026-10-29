@@ -256,13 +256,32 @@ class Canvas:
         self.muted = rgb(cfg.colors.muted)
         self._layer: Image.Image | None = None
         self._ld: ImageDraw.ImageDraw | None = None
+        self.has_media = False  # fundo é vídeo/foto/imagem (alguns temas desenham fundo próprio se não for)
 
     def f(self, size, weight=700):
         return font(self.fam, size, weight)
 
     def text(self, xy, s, size, color=None, weight=700, anchor="mm", alpha=255):
         c = color or self.txt
+        if alpha < 255:
+            self.text_alpha(xy, s, self.f(size, weight), c, alpha, anchor)
+            return
         self.d.text(xy, s, font=self.f(size, weight), fill=with_alpha(c, alpha), anchor=anchor)
+
+    def text_alpha(self, xy, s, fnt, color, alpha, anchor="mm", **kw):
+        """Texto semitransparente. O Pillow ignora o alfa de texto desenhado direto numa imagem RGB, então
+        desenha numa camada do tamanho do texto e cola com a transparência."""
+        x0, y0, x1, y1 = self.d.textbbox(xy, s, font=fnt, anchor=anchor, stroke_width=kw.get("stroke_width", 0))
+        x0, y0 = int(x0) - 1, int(y0) - 1
+        if x1 <= x0 or y1 <= y0:
+            return
+        layer = Image.new("RGBA", (int(x1) - x0 + 2, int(y1) - y0 + 2), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).text((xy[0] - x0, xy[1] - y0), s, font=fnt, fill=with_alpha(color, 255),
+                                   anchor=anchor, **kw)
+        if alpha < 255:
+            layer.putalpha(layer.getchannel("A").point(lambda v: v * alpha // 255))
+        self.img.paste(layer, (x0, y0), layer)
+        self.d = ImageDraw.Draw(self.img, "RGBA")
 
     def value_unit(self, x, y, value, unit, size, color=None, unit_size=None, anchor="center"):
         """Número grande + unidade pequena, alinhados pela linha de base."""
@@ -634,6 +653,8 @@ def theme_compacto(c: Canvas):
     c.d.line([(W // 2, H - 118), (W // 2, H - 28)], fill=with_alpha(c.muted, 80), width=2)
 
 
+ANIMATED_THEMES: set = set()  # temas que se mexem sozinhos (feixe, ponteiro…): o motor redesenha mais vezes
+
 THEME_FUNCS = {
     "aneis": theme_aneis,
     "neon": theme_neon,
@@ -714,6 +735,7 @@ def render(cfg: Config, metrics: dict, theme: str | None = None,
     with _render_lock:  # motor e miniaturas da interface desenham em threads diferentes
         base = base_background(cfg, media_frame)
         c = Canvas(base, cfg, metrics)
+        c.has_media = media_frame is not None or bool(cfg.bg_image)
         THEME_FUNCS.get(theme, theme_aneis)(c)
         c.flush()
         return c.img

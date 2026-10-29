@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import math
 import time
 
-from PIL import Image, ImageDraw
-
-from . import music, render
+from . import render
 from .render import H, W, fmt_metric, fmt_pct, metric_pct, temp_color, temp_value, with_alpha
 
 
@@ -115,7 +112,6 @@ def theme_led(c):
     """Dígitos de LED: números enormes com brilho, estilo painel digital."""
     m, cfg = c.m, c.cfg
     c.d.rectangle([0, 0, W, H], fill=(6, 4, 4, 255))
-    fbig = render.font("Orbitron", 130, 700)
     for i, (label, key, col) in enumerate(((cfg.cpu_label, "cpu_temp", (255, 60, 40)),
                                            (cfg.gpu_label, "gpu_temp", (60, 220, 255)))):
         y = 150 + i * 200
@@ -130,66 +126,8 @@ def theme_led(c):
         c.text((W / 2, 452), render.fmt_clock(cfg, now), 30, (255, 170, 60), 700)
 
 
-# ----------------------------------------------------------------------
-# música
-# ----------------------------------------------------------------------
-def _layout_polaroid(x):
-    """Polaroide: capa numa foto instantânea levemente inclinada, título escrito embaixo."""
-    c = x.c
-    cov = x.cover(250)
-    card = Image.new("RGBA", (290, 340), (245, 242, 236, 255))
-    if cov is not None:
-        card.paste(cov, (20, 20))
-    else:
-        ImageDraw.Draw(card).rectangle([20, 20, 270, 270], fill=c.acc + (255,))
-    d = ImageDraw.Draw(card)
-    d.text((145, 300), music._ellipsize(d, x.title(), c.f(26, 700), 260), font=c.f(26, 700), fill=(40, 40, 46),
-           anchor="mm")
-    ang = -4 + 2 * math.sin(time.time() * 0.6) if x.media.get("status") == "Playing" else -4
-    rot = card.rotate(ang, Image.BICUBIC, expand=True)
-    shadow = Image.new("RGBA", rot.size, (0, 0, 0, 0))
-    shadow.putalpha(rot.getchannel("A").point(lambda v: v // 3))
-    c.img.paste(shadow, (W // 2 - rot.width // 2 + 8, 30 + 10), shadow)
-    c.img.paste(rot, (W // 2 - rot.width // 2, 30), rot)
-    c.d = ImageDraw.Draw(c.img, "RGBA")
-    x.T((240, 410), x.artist(), 24 if x.has else 16, c.txt, 600, max_w=W - 40)
-    x.progress(50, W - 50, 434, times=False)
-    music.draw_spectrum(c, x.viz, x.wave if x.wave != "circulo" else "onda", (444, 476), None)
-
-
-def _layout_radio(x):
-    """Rádio antigo: dial de frequência que anda com a música, alto-falante pulsando com o grave."""
-    c = x.c
-    wood = (92, 58, 34)
-    c.d.rounded_rectangle([20, 40, W - 20, H - 40], 30, fill=wood + (255,), outline=(60, 36, 20, 255), width=6)
-    c.d.rounded_rectangle([44, 64, W - 44, 170], 14, fill=(236, 214, 160, 255))
-    for i in range(0, 21):  # escala do dial
-        xx = 64 + i * (W - 128) / 20
-        c.d.line([(xx, 140), (xx, 160 if i % 5 else 128)], fill=(80, 60, 40, 255), width=2)
-    dur = float(x.media.get("duration") or 0)
-    frac = (float(x.media.get("position") or 0) / dur) if dur > 0 else 0.5
-    nx = 64 + frac * (W - 128)
-    c.d.line([(nx, 74), (nx, 162)], fill=(200, 30, 30, 255), width=4)
-    x.T((240, 98), x.title(), 28, (60, 40, 25), 700, max_w=W - 120)
-    x.T((240, 124), x.artist(), 18, (100, 75, 50), 600, max_w=W - 120)
-    cx, cy = 160, 300
-    r = 92 + (x.viz.bass * 10 if x.viz else 0)
-    c.d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(40, 26, 16, 255))
-    for k in range(5):  # grade do alto-falante
-        rr = r - 10 - k * 16
-        if rr > 4:
-            c.d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], outline=(110, 80, 50, 255), width=3)
-    cov = x.cover(120)
-    if cov is not None:
-        c.img.paste(cov, (300, 240), music._round_mask(120, 12))
-        c.d = ImageDraw.Draw(c.img, "RGBA")
-    if x.viz is not None and x.wave != "off":
-        music.draw_bars(c, x.viz, 380, 420, "barras", 230, 290, W - 50)
-    x.app_line((370, 225), size=16)
-
-
 render.THEMES.update({"terminal": "Terminal retrô", "hud": "HUD cyberpunk", "barras": "Barras verticais",
                       "led": "Dígitos de LED"})
 render.THEME_FUNCS.update({"terminal": theme_terminal, "hud": theme_hud, "barras": theme_barras, "led": theme_led})
-music.LAYOUTS.update({"polaroid": "Polaroide", "radio": "Rádio antigo"})
-music.LAYOUT_FUNCS.update({"polaroid": _layout_polaroid, "radio": _layout_radio})
+
+from . import music_extra, themes_display  # noqa: E402,F401  (mais modelos de música e mais temas)

@@ -496,12 +496,14 @@ class Engine(threading.Thread):
         key = _render_key(m, theme)
         if cfg.clock_format in ("hora_seg", "completo"):
             key = (key, m["now"].second)
+        if theme in render.ANIMATED_THEMES:  # radar girando, ponteiro dos segundos, alternância CPU/GPU
+            key = (key, int(time.monotonic() * 10))
         if theme == "musica":  # barras e capa mexem a cada quadro: a chave inclui o som e a música
             med = self._media_now or {}
             playing = med.get("status") == "Playing"
             key = (key, tuple(round(b, 2) for b in self._viz.bands), round(self._viz.bass, 2), med.get("title"),
                    int(med.get("position") or 0), med.get("status"), med.get("cover"),
-                   int(time.monotonic() * 25) if playing and cfg.music_layout == "vinil" else 0)  # vinil girando
+                   int(time.monotonic() * 25) if playing and cfg.music_layout in music.ANIMATED else 0)  # vinil, letra…
         now = time.monotonic()
         # no máximo 10 redesenhos por segundo: a animação dos números continua lisa no olho
         min_gap = 1 / 30 if theme == "musica" and self._viz.active else 0.1
