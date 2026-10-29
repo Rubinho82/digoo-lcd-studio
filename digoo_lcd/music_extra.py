@@ -5,15 +5,29 @@ from __future__ import annotations
 import math
 import time
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from . import lyrics, music
 from .music import H, W, _ellipsize, _round_mask, draw_bars, draw_spectrum, fmt_time
 from .render import font, mix
+from .textdraw import Draw
+
+
+def _split_long(d, wd: str, fnt, max_w: float) -> list[str]:
+    """Japonês/chinês não têm espaço entre palavras: o que não cabe é quebrado por caractere."""
+    if d.textlength(wd, font=fnt) <= max_w:
+        return [wd]
+    parts, cur = [], ""
+    for ch in wd:
+        if cur and d.textlength(cur + ch, font=fnt) > max_w:
+            parts.append(cur)
+            cur = ""
+        cur += ch
+    return parts + [cur] if cur else parts
 
 
 def _wrap(d, text: str, fnt, max_w: float, max_lines: int = 2) -> list[str]:
-    words, lines, cur = text.split(), [], ""
+    words, lines, cur = [p for wd in text.split() for p in _split_long(d, wd, fnt, max_w)], [], ""
     for wd in words:
         trial = (cur + " " + wd).strip()
         if d.textlength(trial, font=fnt) <= max_w or not cur:
@@ -45,10 +59,10 @@ def _sweep(x, cx, y, text, size, frac, hi, anchor="mm"):
     w = c.d.textlength(text, font=f)
     x0 = cx - w / 2 if anchor == "mm" else cx
     layer = Image.new("RGBA", (int(w) + 12, size * 2), (0, 0, 0, 0))
-    ImageDraw.Draw(layer).text((6, size), text, font=f, fill=tuple(hi) + (255,), anchor="lm", **x.sk)
+    Draw(layer).text((6, size), text, font=f, fill=tuple(hi) + (255,), anchor="lm", **x.sk)
     part = layer.crop((0, 0, int(6 + w * min(1.0, frac)), layer.height))
     c.img.paste(part, (int(x0) - 6, int(y - size)), part)
-    c.d = ImageDraw.Draw(c.img, "RGBA")
+    c.d = Draw(c.img, "RGBA")
 
 
 def _lyr_state(x):
@@ -83,7 +97,7 @@ def _header(x, y=18, size=64):
     tx = 20
     if cov is not None:
         c.img.paste(cov, (20, y), _round_mask(size, 12))
-        c.d = ImageDraw.Draw(c.img, "RGBA")
+        c.d = Draw(c.img, "RGBA")
         tx = 20 + size + 14
     x.T((tx, y + size * 0.32), x.title(), 24, c.txt, 700, anchor="lm", max_w=W - tx - 20)
     x.T((tx, y + size * 0.72), x.artist(), 17, c.muted, 600, anchor="lm", max_w=W - tx - 20)
@@ -181,7 +195,7 @@ def _layout_letra_capa(x):
     tx = 24
     if cov is not None:
         c.img.paste(cov, (24, 404), _round_mask(52, 10))
-        c.d = ImageDraw.Draw(c.img, "RGBA")
+        c.d = Draw(c.img, "RGBA")
         tx = 90
     x.T((tx, 418), x.title(), 21, c.txt, 700, anchor="lm", max_w=W - tx - 24)
     x.T((tx, 442), x.artist(), 16, c.muted, 600, anchor="lm", max_w=W - tx - 24)
@@ -241,7 +255,7 @@ def _vfd(x, box, text, size, col, speed=50):
     f = font("Share Tech Mono", size, 700)
     w = c.d.textlength(text, font=f)
     layer = Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0))
-    ld = ImageDraw.Draw(layer)
+    ld = Draw(layer)
     if w <= x1 - x0:
         ld.text(((x1 - x0) / 2, (y1 - y0) / 2), text, font=f, fill=col + (255,), anchor="mm")
     else:
@@ -249,7 +263,7 @@ def _vfd(x, box, text, size, col, speed=50):
         for k in (0, 1):
             ld.text((-off + k * (w + 60), (y1 - y0) / 2), text, font=f, fill=col + (255,), anchor="lm")
     c.img.paste(layer, (x0, y0), layer)
-    c.d = ImageDraw.Draw(c.img, "RGBA")
+    c.d = Draw(c.img, "RGBA")
 
 
 def _layout_aparelho(x):
@@ -305,7 +319,7 @@ def _layout_pixel(x):
     c = x.c
     S = 160
     img = Image.new("RGBA", (S, S), _GB[3] + (255,))
-    d = ImageDraw.Draw(img)
+    d = Draw(img)
     d.fontmode = "1"  # sem suavização: letras em pixels
     d.rectangle([2, 2, S - 3, S - 3], outline=_GB[0])
     cov = x.cover(160)
@@ -347,7 +361,7 @@ def _layout_pixel(x):
         d.text((S - 9, 145), fmt_time(dur), font=fx, fill=_GB[0], anchor="ra")
     big = img.resize((W, H), Image.NEAREST)
     c.img.paste(big, (0, 0), big)
-    c.d = ImageDraw.Draw(c.img, "RGBA")
+    c.d = Draw(c.img, "RGBA")
 
 
 def _layout_ondas(x):
@@ -392,8 +406,8 @@ def _layout_polaroid(x):
     if cov is not None:
         card.paste(cov, (20, 20))
     else:
-        ImageDraw.Draw(card).rectangle([20, 20, 270, 270], fill=c.acc + (255,))
-    d = ImageDraw.Draw(card)
+        Draw(card).rectangle([20, 20, 270, 270], fill=c.acc + (255,))
+    d = Draw(card)
     d.text((145, 300), _ellipsize(d, x.title(), c.f(26, 700), 260), font=c.f(26, 700), fill=(40, 40, 46),
            anchor="mm")
     ang = -4 + 2 * math.sin(time.time() * 0.6) if x.media.get("status") == "Playing" else -4
@@ -402,7 +416,7 @@ def _layout_polaroid(x):
     shadow.putalpha(rot.getchannel("A").point(lambda v: v // 3))
     c.img.paste(shadow, (W // 2 - rot.width // 2 + 8, 30 + 10), shadow)
     c.img.paste(rot, (W // 2 - rot.width // 2, 30), rot)
-    c.d = ImageDraw.Draw(c.img, "RGBA")
+    c.d = Draw(c.img, "RGBA")
     x.T((240, 410), x.artist(), 24 if x.has else 16, c.txt, 600, max_w=W - 40)
     x.progress(50, W - 50, 434, times=False)
     draw_spectrum(c, x.viz, x.wave if x.wave != "circulo" else "onda", (444, 476), None)
@@ -433,7 +447,7 @@ def _layout_radio(x):
     cov = x.cover(120)
     if cov is not None:
         c.img.paste(cov, (300, 240), _round_mask(120, 12))
-        c.d = ImageDraw.Draw(c.img, "RGBA")
+        c.d = Draw(c.img, "RGBA")
     if x.viz is not None and x.wave != "off":
         draw_bars(c, x.viz, 380, 420, "barras", 230, 290, W - 50)
     x.app_line((370, 225), size=16)

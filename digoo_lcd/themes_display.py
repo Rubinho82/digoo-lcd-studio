@@ -6,9 +6,10 @@ from __future__ import annotations
 import math
 import time
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageFilter
 
 from . import render
+from .textdraw import Draw
 from .render import H, W, fmt_metric, fmt_pct, metric_pct, temp_color, temp_value, with_alpha
 
 
@@ -235,7 +236,7 @@ def _vidro_bg(c1, c2):
     k = (c1, c2)
     if k not in _vidro_cache:
         img = Image.new("RGB", (W, H), (10, 10, 18))
-        d = ImageDraw.Draw(img)
+        d = Draw(img)
         d.ellipse([-60, -40, 260, 280], fill=c1)
         d.ellipse([240, 200, 560, 520], fill=c2)
         d.ellipse([180, -80, 420, 140], fill=render.mix(c1, c2, 0.5))
@@ -255,9 +256,9 @@ def theme_vidro(c):
         reg = c.img.crop(box).convert("RGB").filter(ImageFilter.GaussianBlur(14))
         reg = Image.blend(reg, Image.new("RGB", reg.size, (255, 255, 255)), 0.12)
         mask = Image.new("L", reg.size, 0)
-        ImageDraw.Draw(mask).rounded_rectangle([0, 0, reg.width - 1, reg.height - 1], 22, fill=255)
+        Draw(mask).rounded_rectangle([0, 0, reg.width - 1, reg.height - 1], 22, fill=255)
         c.img.paste(reg, box[:2], mask)
-    c.d = ImageDraw.Draw(c.img, "RGBA")
+    c.d = Draw(c.img, "RGBA")
     for box in boxes:
         c.rrect(box, 22, outline=(255, 255, 255, 90), width=2)
     render.header(c)
@@ -286,7 +287,7 @@ def theme_rpg(c):
     m, cfg = c.m, c.cfg
     S = 160
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+    d = Draw(img)
     d.fontmode = "1"  # sem suavização: letras em pixels
     blue, white = (24, 32, 120), (248, 248, 248)
     d.rectangle([3, 3, S - 4, S - 4], fill=blue + (255,), outline=white, width=2)
@@ -313,7 +314,7 @@ def theme_rpg(c):
         y += 29
     big = img.resize((W, H), Image.NEAREST)
     c.img.paste(big, (0, 0), big)
-    c.d = ImageDraw.Draw(c.img, "RGBA")
+    c.d = Draw(c.img, "RGBA")
 
 
 render.THEMES.update({"anel_unico": "Anel único (alterna)", "lista": "Lista de sensores",

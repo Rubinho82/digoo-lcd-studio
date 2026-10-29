@@ -10,6 +10,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from .config import Config, METRICS, resource_dir
+from .textdraw import Draw
 
 W = H = 480
 SS = 2  # supersampling dos anéis/arcos
@@ -246,7 +247,7 @@ def base_background(cfg: Config, media_frame: Image.Image | None = None,
 class Canvas:
     def __init__(self, base: Image.Image, cfg: Config, m: dict):
         self.img = base
-        self.d = ImageDraw.Draw(self.img, "RGBA")
+        self.d = Draw(self.img, "RGBA")
         self.cfg = cfg
         self.m = m
         self.fam = cfg.font
@@ -276,12 +277,12 @@ class Canvas:
         if x1 <= x0 or y1 <= y0:
             return
         layer = Image.new("RGBA", (int(x1) - x0 + 2, int(y1) - y0 + 2), (0, 0, 0, 0))
-        ImageDraw.Draw(layer).text((xy[0] - x0, xy[1] - y0), s, font=fnt, fill=with_alpha(color, 255),
+        Draw(layer).text((xy[0] - x0, xy[1] - y0), s, font=fnt, fill=with_alpha(color, 255),
                                    anchor=anchor, **kw)
         if alpha < 255:
             layer.putalpha(layer.getchannel("A").point(lambda v: v * alpha // 255))
         self.img.paste(layer, (x0, y0), layer)
-        self.d = ImageDraw.Draw(self.img, "RGBA")
+        self.d = Draw(self.img, "RGBA")
 
     def value_unit(self, x, y, value, unit, size, color=None, unit_size=None, anchor="center"):
         """Número grande + unidade pequena, alinhados pela linha de base."""
@@ -305,7 +306,7 @@ class Canvas:
     def _layer_draw(self):
         if self._layer is None:
             self._layer = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
-            self._ld = ImageDraw.Draw(self._layer, "RGBA")
+            self._ld = Draw(self._layer, "RGBA")
         return self._ld
 
     def arc(self, cx, cy, r, width, start, end, color, alpha=255, caps=True):
@@ -356,7 +357,7 @@ class Canvas:
             self.img.paste(small, (0, 0), small)
             self._layer = None
             self._ld = None
-            self.d = ImageDraw.Draw(self.img, "RGBA")
+            self.d = Draw(self.img, "RGBA")
 
     def glow_text(self, xy, s, size, color, weight=700, anchor="mm", radius=10, strength=2):
         fnt = self.f(size, weight)
@@ -367,13 +368,13 @@ class Canvas:
         if box[2] <= box[0] or box[3] <= box[1]:
             return
         layer = Image.new("RGBA", (box[2] - box[0], box[3] - box[1]), (0, 0, 0, 0))
-        ImageDraw.Draw(layer).text((xy[0] - box[0], xy[1] - box[1]), s, font=fnt,
+        Draw(layer).text((xy[0] - box[0], xy[1] - box[1]), s, font=fnt,
                                    fill=with_alpha(color, 255), anchor=anchor)
         glow = layer.filter(ImageFilter.GaussianBlur(radius))
         for _ in range(strength):
             self.img.paste(glow, box[:2], glow)
         self.img.paste(layer, box[:2], layer)
-        self.d = ImageDraw.Draw(self.img, "RGBA")
+        self.d = Draw(self.img, "RGBA")
 
     def sparkline(self, box, values, color, vmin=0.0, vmax=100.0, fill_alpha=50, width=3):
         x0, y0, x1, y1 = box

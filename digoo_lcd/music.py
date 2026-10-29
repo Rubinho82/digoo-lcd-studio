@@ -8,7 +8,9 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageFilter, ImageFont, ImageOps
+
+from .textdraw import Draw
 
 W = H = 480
 TOAST_SECONDS = 8.0
@@ -152,14 +154,14 @@ def _cover_palette(path: str) -> tuple | None:
 @lru_cache(maxsize=8)
 def _round_mask(size: int, radius: int) -> Image.Image:
     m = Image.new("L", (size * 2, size * 2), 0)
-    ImageDraw.Draw(m).rounded_rectangle([0, 0, size * 2 - 1, size * 2 - 1], radius * 2, fill=255)
+    Draw(m).rounded_rectangle([0, 0, size * 2 - 1, size * 2 - 1], radius * 2, fill=255)
     return m.resize((size, size), Image.LANCZOS)
 
 
 @lru_cache(maxsize=8)
 def _circle_mask(size: int) -> Image.Image:
     m = Image.new("L", (size * 2, size * 2), 0)
-    ImageDraw.Draw(m).ellipse([0, 0, size * 2 - 1, size * 2 - 1], fill=255)
+    Draw(m).ellipse([0, 0, size * 2 - 1, size * 2 - 1], fill=255)
     return m.resize((size, size), Image.LANCZOS)
 
 
@@ -293,7 +295,7 @@ def draw_card(c, media: dict, y_anim: float = 1.0):
     x_text = 26
     if cov is not None:
         c.img.paste(cov, (24, y0 + 12), _round_mask(94, 14))
-        c.d = ImageDraw.Draw(c.img, "RGBA")
+        c.d = Draw(c.img, "RGBA")
         x_text = 132
     fw, fa, fs = c.f(30, 700), c.f(22, 600), c.f(16, 600)
     title = _ellipsize(c.d, media.get("title", ""), fw, W - x_text - 26)
@@ -328,7 +330,7 @@ def draw_pill(c, media: dict, x: int = 10, y: int = 10, w: int = 300):
     tx = x + 20
     if cov is not None:
         c.img.paste(cov, (x + 6, y + 6), _circle_mask(46))
-        c.d = ImageDraw.Draw(c.img, "RGBA")
+        c.d = Draw(c.img, "RGBA")
         tx = x + 62
     f1, f2 = c.f(22, 700), c.f(16, 600)
     c.d.text((tx, y + 20), _ellipsize(c.d, media.get("title", ""), f1, w - (tx - x) - 16), font=f1,
@@ -419,7 +421,7 @@ def _layout_capa(x: _Ctx):
         size = int(R * 2 * (1.0 + (x.viz.bass * 0.05 if x.viz else 0)))  # capa "respira" com o grave
         cv = cov.resize((size, size), Image.BILINEAR) if size != R * 2 else cov
         c.img.paste(cv, (cx - size // 2, cy - size // 2), _round_mask(size, 26))
-        c.d = ImageDraw.Draw(c.img, "RGBA")
+        c.d = Draw(c.img, "RGBA")
     else:
         x.note(cx, cy, R)
     x.clock((240, 30))
@@ -455,7 +457,7 @@ def _layout_vinil(x: _Ctx):
         c.img.paste(rot, (cx - lab // 2, cy - lab // 2), _circle_mask(lab))
     else:
         c.d.ellipse([cx - lab // 2, cy - lab // 2, cx + lab // 2, cy + lab // 2], fill=c.acc + (255,))
-    c.d = ImageDraw.Draw(c.img, "RGBA")
+    c.d = Draw(c.img, "RGBA")
     c.d.ellipse([cx - 6, cy - 6, cx + 6, cy + 6], fill=(20, 20, 24, 255))
     # braço da agulha
     c.line_aa([(430, 40), (410, 64), (345, 205)], (200, 200, 210), 6)
@@ -474,7 +476,7 @@ def _layout_cartao(x: _Ctx):
     cov = x.cover(S)
     if cov is not None:
         c.img.paste(cov, (24, 36), _round_mask(S, 18))
-        c.d = ImageDraw.Draw(c.img, "RGBA")
+        c.d = Draw(c.img, "RGBA")
     else:
         x.note(24 + S // 2, 36 + S // 2, S // 2)
     tx = 24 + S + 18
@@ -531,7 +533,7 @@ def _layout_espectro(x: _Ctx):
     tx = 20
     if cov is not None:
         c.img.paste(cov, (20, 20), _round_mask(84, 12))
-        c.d = ImageDraw.Draw(c.img, "RGBA")
+        c.d = Draw(c.img, "RGBA")
         tx = 120
     x.T((tx, 44), x.title(), 28, c.txt, 700, anchor="lm", max_w=W - tx - 20)
     x.T((tx, 76), x.artist(), 20 if x.has else 15, c.muted, 600, anchor="lm", max_w=W - tx - 20)
@@ -572,5 +574,5 @@ def theme_musica(c):
     if bg is not None and x.op > 0:
         # 0% = transparente (o vídeo/foto atrás aparece inteiro), 100% = capa desfocada cobrindo tudo
         c.img.paste(Image.blend(c.img.convert("RGB"), bg, x.op), (0, 0))
-        c.d = ImageDraw.Draw(c.img, "RGBA")
+        c.d = Draw(c.img, "RGBA")
     LAYOUT_FUNCS.get(_opt(c.cfg, "music_layout", "capa"), _layout_capa)(x)
