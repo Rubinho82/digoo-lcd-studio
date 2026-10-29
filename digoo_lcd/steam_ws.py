@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -279,12 +280,28 @@ def helper_command(*args: str) -> list[str]:
     return [sys.executable, str(main), "--steam-ws", *args]
 
 
+class _ParentGone(Exception):
+    """O app que pediu o download fechou (ou reiniciou): ninguém mais lê o que o auxiliar escreve."""
+
+
 def _emit(**kw):
-    print(json.dumps(kw, ensure_ascii=False), flush=True)
+    try:
+        print(json.dumps(kw, ensure_ascii=False), flush=True)
+    except (OSError, ValueError, AttributeError) as exc:  # pipe fechado / sem stdout
+        raise _ParentGone from exc
 
 
 def helper_main(args: list[str]) -> int:
     """`--steam-ws subscribe <id>` | `unsubscribe <id>` | `status`. Fala JSON por linha no stdout."""
+    try:
+        return _helper(args)
+    except _ParentGone:
+        # o app fechou no meio: a assinatura já está na conta e a própria Steam termina o download sozinha
+        sys.stdout = open(os.devnull, "w")  # senão o Python tenta esvaziar o pipe fechado ao sair
+        return 5
+
+
+def _helper(args: list[str]) -> int:
     wd = we_dir()
     dll_path = wd / "bin" / "steam_api64.dll" if wd else None
     if not dll_path or not dll_path.exists():
@@ -375,15 +392,39 @@ def helper_main(args: list[str]) -> int:
         dll.SteamAPI_Shutdown()
 
 
+_running: set = set()
+_running_lock = threading.Lock()
+
+
 def run_helper(args: list[str], on_line) -> int:
     """Roda o auxiliar e repassa cada linha JSON para on_line(dict)."""
     p = subprocess.Popen(helper_command(*args), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                         stdin=subprocess.DEVNULL, text=True, encoding="utf8", creationflags=CREATE_NO_WINDOW)
-    for line in p.stdout:
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                on_line(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    return p.wait()
+                         stdin=subprocess.DEVNULL, text=True, encoding="utf8", errors="replace",
+                         creationflags=CREATE_NO_WINDOW)
+    with _running_lock:
+        _running.add(p)
+    try:
+        for line in p.stdout:
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    on_line(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        return p.wait()
+    finally:
+        if p.poll() is None:  # saiu da leitura antes do auxiliar terminar: não deixa ele órfão
+            p.kill()
+        with _running_lock:
+            _running.discard(p)
+
+
+def stop_helpers() -> None:
+    """Ao fechar o app: encerra os auxiliares (a Steam continua os downloads assinados sozinha)."""
+    with _running_lock:
+        procs = list(_running)
+    for p in procs:
+        try:
+            p.kill()
+        except OSError:
+            pass

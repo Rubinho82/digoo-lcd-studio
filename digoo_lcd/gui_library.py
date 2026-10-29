@@ -915,4 +915,7 @@ class LibraryTab(QWidget):
             self._show_effects()
 
     def shutdown(self):
+        from .steam_ws import stop_helpers
+
+        stop_helpers()  # sem isso o app "fechava" mas ficava vivo até um download grande da Steam acabar
         self.pool.shutdown(wait=False, cancel_futures=True)
