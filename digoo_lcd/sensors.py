@@ -233,11 +233,20 @@ class SensorHub:
             self._gpu_fan_sent = None
 
     def set_audio(self, enabled: bool) -> None:
-        """Liga/desliga a captura do som; reinicia o leitor se mudou."""
+        """Liga/desliga a captura do som sem reiniciar o leitor (comando 'audio on|off'), para não deixar a tela
+        ~2 s sem reagir ao som ao trocar para o tema de música. Reinicia só se o comando falhar."""
         self.want_audio = bool(enabled)
         p = self._proc
-        if p is not None and p.poll() is None and self._audio_running != self.want_audio:
-            self._kill_helper()
+        if p is None or p.poll() is not None:
+            return  # ainda vai subir: _helper_loop passa --audio conforme want_audio
+        if self._audio_running == self.want_audio:
+            return
+        try:
+            p.stdin.write(f"audio {'on' if self.want_audio else 'off'}\n")
+            p.stdin.flush()
+            self._audio_running = self.want_audio
+        except Exception:
+            self._kill_helper()  # pipe falhou: cai no reinício antigo
 
     def audio_snapshot(self):
         return self._audio

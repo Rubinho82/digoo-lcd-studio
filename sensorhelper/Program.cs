@@ -37,7 +37,7 @@ void Emit(string line)
 {
     lock (outLock) stdout.WriteLine(line);
 }
-bool wantAudio = args.Contains("--audio");
+bool[] audioOn = { args.Contains("--audio") };   // ligado/desligado em tempo real pelo comando "audio on|off"
 
 try
 {
@@ -55,34 +55,49 @@ bool gpuFanManual = false;
 var stop = new CancellationTokenSource();
 _ = Task.Run(() =>
 {
-    // também recebe comandos do app: "gpufan 70" | "gpufan auto"
+    // também recebe comandos do app: "gpufan 70" | "gpufan auto" | "audio on" | "audio off"
     try
     {
         var rd = new StreamReader(Console.OpenStandardInput());
         string? line;
         while ((line = rd.ReadLine()) != null)
         {
-            var p = line.Trim().Split(' ');
+            var p = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (p.Length == 2 && p[0] == "gpufan")
                 gpuFanTarget = p[1] == "auto" ? -1 : Math.Clamp(int.TryParse(p[1], out var v) ? v : 100, 30, 100);
+            else if (p.Length == 2 && p[0] == "audio")
+                Volatile.Write(ref audioOn[0], p[1] == "on");   // liga/desliga a captura sem reiniciar o leitor
         }
     }
     catch { }
     stop.Cancel();
 });
 
-// som do PC → espectro, ~30 vezes por segundo (só enquanto há som saindo)
-AudioMeter? meter = null;
-if (wantAudio)
+// som do PC → espectro, ~30 vezes por segundo. A captura liga/desliga em tempo real (comando "audio on|off"),
+// sem reiniciar o leitor — assim trocar para o tema de música não deixa a tela ~2 s sem reagir ao som.
+_ = Task.Run(async () =>
 {
-    meter = new AudioMeter();
-    meter.Start();
-    _ = Task.Run(async () =>
+    AudioMeter? meter = null;
+    bool wasActive = false;
+    while (!stop.IsCancellationRequested)
     {
-        bool wasActive = false;
-        while (!stop.IsCancellationRequested)
+        try
         {
-            try
+            bool want = Volatile.Read(ref audioOn[0]);
+            if (want && meter == null)
+            {
+                meter = new AudioMeter();
+                meter.Start();
+                wasActive = false;
+            }
+            else if (!want && meter != null)
+            {
+                meter.Dispose();
+                meter = null;
+                Emit(JsonSerializer.Serialize(new { audio = new { b = new int[48], lv = 0 } }));  // zera as barras na hora
+                wasActive = false;
+            }
+            if (meter != null)
             {
                 bool active = meter.Active;
                 if (active || wasActive)
@@ -92,12 +107,13 @@ if (wantAudio)
                 }
                 wasActive = active;
             }
-            catch (IOException) { stop.Cancel(); }
-            catch { }
-            await Task.Delay(33);
         }
-    });
-}
+        catch (IOException) { stop.Cancel(); }
+        catch { }
+        await Task.Delay(33);
+    }
+    meter?.Dispose();
+});
 
 // "tocando agora" (Spotify, YouTube no navegador…): manda quando muda e a cada 5 s para sincronizar o tempo
 _ = Task.Run(async () =>
@@ -164,7 +180,6 @@ while (!stop.IsCancellationRequested)
 
 gpuFanTarget = -1;
 try { ApplyGpuFan(); } catch { }   // ao sair, a placa volta para o automático
-meter?.Dispose();
 computer.Close();
 return 0;
 
