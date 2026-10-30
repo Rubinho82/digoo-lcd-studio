@@ -1,0 +1,21 @@
+# Digoo LCD Studio
+
+> Software grátis e de código aberto (MIT) para a tela LCD do water cooler Digoo e de outros coolers com o painel
+> HONGTAI/LOVINGCOOL (USB 33c3:7791, 7788 ou 7792). Mostra temperatura da CPU/GPU, GIFs, vídeos, wallpapers do
+> Wallpaper Engine e a música do Spotify/YouTube com letra sincronizada e tradução. Windows 10/11; interface em
+> português.
+
+O water cooler Digoo vem sem software para a telinha; este programa resolve isso. Precisa do driver grátis PawnIO
+(instalável pelo próprio app) para ler a temperatura da CPU.
+
+## Páginas
+- [Site e download](https://rubinho82.github.io/digoo-lcd-studio/): o que faz, como usar e download para Windows.
+- [Water cooler Digoo sem software](https://rubinho82.github.io/digoo-lcd-studio/water-cooler-digoo-sem-software.html): o cooler vem sem programa; como instalar.
+- [Temperatura da CPU e GPU na tela](https://rubinho82.github.io/digoo-lcd-studio/temperatura-cpu-gpu-water-cooler.html): precisa do driver grátis PawnIO.
+- [GIF ou vídeo na tela](https://rubinho82.github.io/digoo-lcd-studio/gif-video-tela-water-cooler.html): arrastar arquivos ou usar a biblioteca online.
+- [Tela voltou para a imagem de fábrica](https://rubinho82.github.io/digoo-lcd-studio/tela-water-cooler-voltou-fabrica.html): manter o app ativo / iniciar com o Windows.
+- [Música do Spotify e YouTube com letra](https://rubinho82.github.io/digoo-lcd-studio/musica-spotify-letra-water-cooler.html): modelo karaokê com tradução.
+
+## Projeto
+- [Código no GitHub](https://github.com/Rubinho82/digoo-lcd-studio)
+- [Download da última versão](https://github.com/Rubinho82/digoo-lcd-studio/releases/latest)
