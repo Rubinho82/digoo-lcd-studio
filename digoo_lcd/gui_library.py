@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -31,6 +32,13 @@ SPECIAL = {"we_local": "Wallpaper Engine — instalados", "efeitos": "Efeitos an
 # fontes online: Workshop do Wallpaper Engine primeiro
 SOURCES = {"workshop": ("Wallpaper Engine — Workshop", lambda cfg: Workshop()), **PROVIDERS}
 BIG_DOWNLOAD = 150 * 1024 * 1024
+
+
+def _open_external(url: str):
+    # só abre links http/https; ignora file:/javascript:/esquemas inesperados do SO
+    u = QUrl(url)
+    if u.scheme().lower() in ("http", "https"):
+        QDesktopServices.openUrl(u)
 
 
 def _pil_pixmap(img: Image.Image, size: int) -> QPixmap:
@@ -131,8 +139,10 @@ class KeysDialog(QDialog):
         f = QFormLayout()
         self.giphy = QLineEdit(cfg.giphy_key)
         self.giphy.setPlaceholderText("cole a API Key do GIPHY")
+        self.giphy.setEchoMode(QLineEdit.Password)
         self.tenor = QLineEdit(cfg.tenor_key)
         self.tenor.setPlaceholderText("cole a chave do Tenor (Google)")
+        self.tenor.setEchoMode(QLineEdit.Password)
         self.rating = QComboBox()
         for label, val in (("Livre (G)", "g"), ("Leve (PG)", "pg"), ("Moderado (PG-13)", "pg-13"), ("Adulto (R)", "r")):
             self.rating.addItem(label, val)
@@ -141,6 +151,10 @@ class KeysDialog(QDialog):
         f.addRow("Tenor", self.tenor)
         f.addRow("Filtro de conteúdo", self.rating)
         v.addLayout(f)
+        # as chaves ficam mascaradas; o usuário marca para conferir o que colou
+        self.chk_show = QCheckBox("Mostrar chaves")
+        self.chk_show.toggled.connect(self._toggle_echo)
+        v.addWidget(self.chk_show)
         row = QHBoxLayout()
         for label, url in (("Abrir site do GIPHY", "https://developers.giphy.com/dashboard/?create=true"),
                            ("Abrir guia do Tenor", "https://developers.google.com/tenor/guides/quickstart")):
@@ -152,6 +166,11 @@ class KeysDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
+
+    def _toggle_echo(self, show: bool):
+        mode = QLineEdit.Normal if show else QLineEdit.Password
+        self.giphy.setEchoMode(mode)
+        self.tenor.setEchoMode(mode)
 
 
 class LibraryTab(QWidget):
@@ -726,10 +745,14 @@ class LibraryTab(QWidget):
         self.status(f"{len(self.tiles)} resultados{credit}" if self.tiles else "nada encontrado")
 
     def _bg_thumb(self, gen, tile, url):
-        try:
-            path = fetch_thumb(url)
-        except Exception:
-            path = None
+        path = None
+        for attempt in range(2):  # um soluço de rede não deve deixar a tile em ✕ até refazer a busca
+            try:
+                path = fetch_thumb(url)
+                break
+            except Exception:
+                if attempt == 0:
+                    time.sleep(0.5)
         self.bridge.call.emit(lambda: self._set_tile_file(gen, tile, path))
 
     # -- ações ----------------------------------------------------------------
@@ -778,11 +801,11 @@ class LibraryTab(QWidget):
                     self.lib.remove(name)
                     self._show_local()
             elif action == "page" and e.page_url:
-                QDesktopServices.openUrl(QUrl(e.page_url))
+                _open_external(e.page_url)
             return
         item: Item = p
         if action == "page":
-            QDesktopServices.openUrl(QUrl(item.page_url or item.media_url))
+            _open_external(item.page_url or item.media_url)
             return
         if item.provider == "workshop":
             self._ws_action(item, action)

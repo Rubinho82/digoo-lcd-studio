@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import copy as _copy
+import ctypes
 import json
 import os
 import sys
@@ -164,6 +167,8 @@ class Config:
     config_version: int = 2
     start_minimized: bool = False
     release_on_exit: bool = True
+    update_check: bool = True       # checar versão nova no GitHub (1x/dia, em segundo plano)
+    update_last_check: str = ""     # ISO da última checagem (vazio = nunca)
 
     # ------------------------------------------------------------------
     def to_dict(self) -> dict:
@@ -191,15 +196,73 @@ class Config:
         return cfg
 
     def copy(self) -> "Config":
-        return Config.from_dict(json.loads(json.dumps(self.to_dict())))
+        # cópia profunda direta (usada por quadro nas camadas móveis): evita o round-trip JSON +
+        # re-rodar from_dict (fatiar grid_slots, migrações) a cada quadro.
+        return _copy.deepcopy(self)
 
 
 _lock = threading.Lock()
 
+# Chaves de API (algumas pagas) ficam cifradas em repouso com DPAPI do Windows (escopo do
+# usuário): um config.json copiado para outra conta/máquina fica inútil, sem pedir senha.
+_KEY_FIELDS = ("claude_key", "deepl_key", "giphy_key", "tenor_key")
+_DPAPI_PREFIX = "dpapi:"
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.c_ulong), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+def _dpapi_protect(text: str) -> str | None:
+    """Cifra uma string com CryptProtectData; devolve 'dpapi:'+base64 ou None em falha."""
+    try:
+        data = text.encode("utf-8")
+        buf = ctypes.create_string_buffer(data, len(data))
+        blob_in = _DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+        blob_out = _DATA_BLOB()
+        ok = ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out))
+        if not ok:
+            return None
+        try:
+            raw = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+        return _DPAPI_PREFIX + base64.b64encode(raw).decode("ascii")
+    except Exception:
+        return None
+
+
+def _dpapi_unprotect(token: str) -> str | None:
+    """Decifra um valor 'dpapi:'+base64 com CryptUnprotectData; None se não for desta conta/máquina."""
+    try:
+        raw = base64.b64decode(token[len(_DPAPI_PREFIX):])
+        buf = ctypes.create_string_buffer(raw, len(raw))
+        blob_in = _DATA_BLOB(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+        blob_out = _DATA_BLOB()
+        ok = ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out))
+        if not ok:
+            return None
+        try:
+            out = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+        return out.decode("utf-8")
+    except Exception:
+        return None
+
 
 def load() -> Config:
     try:
-        return Config.from_dict(json.loads(CONFIG_PATH.read_text(encoding="utf8")))
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf8"))
+        # Decifra as chaves já migradas; valores em texto puro (config antigo) passam direto.
+        for name in _KEY_FIELDS:
+            val = data.get(name)
+            if isinstance(val, str) and val.startswith(_DPAPI_PREFIX):
+                clear = _dpapi_unprotect(val)
+                data[name] = clear if clear is not None else ""
+        return Config.from_dict(data)
     except FileNotFoundError:
         return Config()
     except Exception:
@@ -213,6 +276,14 @@ def load() -> Config:
 
 def save(cfg: Config) -> None:
     with _lock:
+        data = cfg.to_dict()
+        # Cifra as chaves de API em repouso (se o DPAPI falhar, grava em texto puro p/ não perder a chave).
+        for name in _KEY_FIELDS:
+            val = data.get(name)
+            if isinstance(val, str) and val and not val.startswith(_DPAPI_PREFIX):
+                enc = _dpapi_protect(val)
+                if enc is not None:
+                    data[name] = enc
         tmp = CONFIG_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps(cfg.to_dict(), indent=2, ensure_ascii=False), encoding="utf8")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf8")
         os.replace(tmp, CONFIG_PATH)

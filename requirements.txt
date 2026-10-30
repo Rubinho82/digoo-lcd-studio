@@ -5,5 +5,4 @@ psutil>=5.9
 mss>=9.0
 av>=12.0
 numpy>=1.22
-anthropic>=2.3
 certifi

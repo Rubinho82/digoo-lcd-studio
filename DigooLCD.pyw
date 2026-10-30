@@ -79,8 +79,10 @@ def _crash_log(text: str) -> None:
 
 
 if __name__ == "__main__":
-    _ensure_admin()
     try:
+        # _ensure_admin() dentro do try: falhas antes da janela (import do PySide6,
+        # QLocalServer.listen, elevação) passam a ter feedback visível em vez de sumir.
+        _ensure_admin()
         from digoo_lcd.main import main
 
         sys.exit(main())
@@ -90,4 +92,18 @@ if __name__ == "__main__":
         import traceback
 
         _crash_log("\n" + traceback.format_exc())
+        # App é --windowed (sem console): sem isto o raise não aparece em lugar nenhum.
+        try:
+            log_path = Path(os.environ.get("APPDATA", Path.home())) / "DigooLCD" / "crash.log"
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "O Digoo LCD Studio não conseguiu abrir.\n\n"
+                f"Os detalhes foram salvos em:\n{log_path}\n\n"
+                "Para um relatório completo, rode no Prompt:\n"
+                "DigooLCD.exe --diagnostico",
+                "Digoo LCD Studio — erro ao abrir",
+                0x10,  # MB_ICONERROR
+            )
+        except Exception:
+            pass
         raise

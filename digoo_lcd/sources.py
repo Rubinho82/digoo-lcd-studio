@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import itertools
 import logging
 import threading
 import time
@@ -17,6 +18,8 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
 GIF_EXT = {".gif"}
 VIDEO_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".flv", ".ogv"}
 MEDIA_EXT = IMAGE_EXT | GIF_EXT | VIDEO_EXT
+
+_FRAME_SEQ = itertools.count()  # id único e estável por _Frames (id() do CPython é reaproveitado)
 
 
 def fit_image(img: Image.Image, mode: str, resample=Image.BILINEAR) -> Image.Image:
@@ -221,7 +224,7 @@ class _Frames:
         self.is_gif = is_gif
         self._idx = -1
         self._enc: Encoded | None = None
-        self._uid = id(self)
+        self._uid = next(_FRAME_SEQ)
 
     def frame_at(self, t: float) -> Encoded:
         i = self.ff.index_at((t * self.speed) % self.ff.duration)

@@ -87,12 +87,20 @@ def _mymemory_one(text: str, target: str) -> tuple[str | None, str | None]:
     if d.get("quotaFinished"):
         raise TranslateError("O limite diário grátis do MyMemory acabou. Amanhã volta, ou use DeepL/Claude.",
                              retry=3600)
+    try:  # o MyMemory devolve erro com HTTP 200 e responseStatus != 200 (pode vir como string)
+        status = int(str(d.get("responseStatus", 200)) or 200)
+    except (TypeError, ValueError):
+        status = 200
+    if status == 429:
+        raise TranslateError("Muitos pedidos ao MyMemory; tento de novo em instantes.", retry=10)
+    if status != 200:  # 403, langpair inválido etc.: a mensagem de erro vem dentro de translatedText
+        raise TranslateError(f"MyMemory recusou o pedido (status {status}).", retry=1e9)
     rd = d.get("responseData") or {}
     out = rd.get("translatedText")
     return (html.unescape(out).replace("\r", "") if out else None), rd.get("detectedLanguage")
 
 
-def _mymemory(lines: list[str], target: str, media: dict) -> tuple[list[str], str | None]:
+def _mymemory(lines: list[str], target: str, media: dict) -> tuple[list[str], str | None, bool]:
     chunks, cur = [], []
     for s in lines:  # o MyMemory aceita até 500 bytes por pedido
         if cur and len("\n".join(cur + [s]).encode("utf8")) > 450:
@@ -105,24 +113,32 @@ def _mymemory(lines: list[str], target: str, media: dict) -> tuple[list[str], st
 
     first, src = _mymemory_one("\n".join(chunks[0]), target)  # o primeiro diz o idioma de origem
     if _same_lang(src, target):
-        return lines, src
+        return lines, src, False
+
+    degraded = []  # linhas que voltaram sem tradução (ficou o original): não vale gravar no cache
 
     def piece(ch, tr=None):
         tr = tr if tr is not None else _mymemory_one("\n".join(ch), target)[0]
         parts = [p.strip() for p in (tr or "").split("\n")]
         if tr is None or len(parts) != len(ch):  # perdeu o alinhamento: traduz linha por linha
-            parts = [(_mymemory_one(s, target)[0] or s).strip() for s in ch]
+            parts = []
+            for s in ch:
+                one = _mymemory_one(s, target)[0]
+                if not one:  # não traduziu: fica o original (degradado)
+                    degraded.append(True)
+                    one = s
+                parts.append(one.strip())
         return parts
 
-    with ThreadPoolExecutor(max_workers=4) as pool:  # pedaços em paralelo: a música sai em segundos
+    with ThreadPoolExecutor(max_workers=2) as pool:  # pedaços em paralelo sem forçar o rate-limit curto
         rest = list(pool.map(piece, chunks[1:]))
     out = piece(chunks[0], first)
     for parts in rest:
         out += parts
-    return out, src
+    return out, src, bool(degraded)
 
 
-def _deepl(lines: list[str], target: str, media: dict, key: str) -> tuple[list[str], str | None]:
+def _deepl(lines: list[str], target: str, media: dict, key: str) -> tuple[list[str], str | None, bool]:
     if not key:
         raise TranslateError("Cole a chave do DeepL na aba Música.", retry=1e9)
     host = "api-free.deepl.com" if key.strip().endswith(":fx") else "api.deepl.com"
@@ -147,7 +163,7 @@ def _deepl(lines: list[str], target: str, media: dict, key: str) -> tuple[list[s
             raise TranslateError("DeepL devolveu um número diferente de linhas")
         out += [t.get("text", "") for t in tr]
         src = src or (tr[0].get("detected_source_language") if tr else None)
-    return out, src
+    return out, src, False
 
 
 _SYSTEM = (
@@ -178,44 +194,51 @@ _SCHEMA = {
 }
 
 
-def _claude(lines: list[str], target: str, media: dict, key: str) -> tuple[list[str], str | None]:
+def _claude(lines: list[str], target: str, media: dict, key: str) -> tuple[list[str], str | None, bool]:
     if not key:
         raise TranslateError("Cole a chave da API do Claude na aba Música.", retry=1e9)
-    import anthropic  # pesado: só carrega quando alguém usa esse tradutor
-
-    client = anthropic.Anthropic(api_key=key.strip(), timeout=180.0, max_retries=2)
+    # POST direto na API (urllib + SSL_CTX como os outros tradutores): evita arrastar o SDK anthropic
+    # (httpx/httpcore/aiohttp/pydantic/opentelemetry…) para dentro do pacote só por um tradutor opcional pago.
     numbered = json.dumps([{"n": i, "t": s} for i, s in enumerate(lines)], ensure_ascii=False)
     song = f"{media.get('title', '')} — {media.get('artist', '')}".strip(" —")
+    body = json.dumps({
+        "model": CLAUDE_MODEL,
+        "max_tokens": 16000,
+        "fallbacks": "default",  # se o modelo recusar, a própria API tenta o modelo reserva recomendado
+        "output_config": {"effort": "medium", "format": {"type": "json_schema", "schema": _SCHEMA}},
+        "system": _SYSTEM.format(lang=_LANG_EN[target]),
+        "messages": [{"role": "user", "content": f"Song: {song}\n\nLines:\n{numbered}"}],
+    }, ensure_ascii=False).encode("utf8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=body, method="POST",
+        headers={"x-api-key": key.strip(), "anthropic-version": "2023-06-01",
+                 "anthropic-beta": "server-side-fallback-2026-07-01",
+                 "content-type": "application/json", "User-Agent": UA})
     try:
-        resp = client.beta.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=16000,
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",  # se o modelo recusar, a própria API tenta o modelo reserva recomendado
-            output_config={"effort": "medium", "format": {"type": "json_schema", "schema": _SCHEMA}},
-            system=_SYSTEM.format(lang=_LANG_EN[target]),
-            messages=[{"role": "user", "content": f"Song: {song}\n\nLines:\n{numbered}"}],
-        )
-    except anthropic.AuthenticationError as exc:
-        raise TranslateError("Chave da API do Claude inválida.", retry=1e9) from exc
-    except anthropic.PermissionDeniedError as exc:
-        raise TranslateError("A chave do Claude não tem permissão (veja créditos/plano no console).",
-                             retry=1e9) from exc
-    except anthropic.RateLimitError as exc:
-        raise TranslateError("Limite de uso da API do Claude; tento de novo em 1 minuto.") from exc
-    except anthropic.APIStatusError as exc:
-        raise TranslateError(f"API do Claude respondeu erro {exc.status_code}",
-                             retry=60 if exc.status_code >= 500 else 1e9) from exc
-    except anthropic.APIConnectionError as exc:
+        with urllib.request.urlopen(req, timeout=180, context=_ssl()) as r:
+            data = json.loads(r.read().decode("utf8"))
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+        if code == 401:
+            raise TranslateError("Chave da API do Claude inválida.", retry=1e9) from exc
+        if code == 403:
+            raise TranslateError("A chave do Claude não tem permissão (veja créditos/plano no console).",
+                                 retry=1e9) from exc
+        if code == 429:
+            raise TranslateError("Limite de uso da API do Claude; tento de novo em 1 minuto.") from exc
+        raise TranslateError(f"API do Claude respondeu erro {code}",
+                             retry=60 if code >= 500 else 1e9) from exc
+    except urllib.error.URLError as exc:  # HTTPError é subclasse de URLError: capturar depois
         raise TranslateError("Sem conexão com a API do Claude.") from exc
-    if resp.stop_reason == "refusal":
+    if data.get("stop_reason") == "refusal":
         raise TranslateError("A IA não quis traduzir esta letra.", retry=1e9)
-    if resp.stop_reason == "max_tokens":
+    if data.get("stop_reason") == "max_tokens":
         raise TranslateError("A letra é longa demais para traduzir de uma vez.", retry=1e9)
-    text = next((b.text for b in resp.content if b.type == "text"), "")
-    data = json.loads(text)
-    by_n = {int(it["n"]): it["t"] for it in data.get("lines", []) if isinstance(it, dict) and "n" in it}
-    return [by_n.get(i, s) for i, s in enumerate(lines)], data.get("source_language")
+    text = next((b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"), "")
+    parsed = json.loads(text)
+    by_n = {int(it["n"]): it["t"] for it in parsed.get("lines", []) if isinstance(it, dict) and "n" in it}
+    missing = any(i not in by_n for i in range(len(lines)))  # faltou linha: ficou o original (degradado)
+    return [by_n.get(i, s) for i, s in enumerate(lines)], parsed.get("source_language"), missing
 
 
 # ----------------------------------------------------------------------
@@ -268,17 +291,18 @@ class _Worker:
         t0 = time.monotonic()
         try:
             if provider == "mymemory":
-                out, src = _mymemory(uniq, target, media)
+                out, src, partial = _mymemory(uniq, target, media)
             elif provider == "deepl":
-                out, src = _deepl(uniq, target, media, api_key)
+                out, src, partial = _deepl(uniq, target, media, api_key)
             else:
-                out, src = _claude(uniq, target, media, api_key)
+                out, src, partial = _claude(uniq, target, media, api_key)
             mapping = dict(zip(uniq, out))
-            try:
-                CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                self._path(key).write_text(json.dumps({"map": mapping, "src": src}, ensure_ascii=False), "utf8")
-            except OSError:
-                pass
+            if not partial:  # tradução degradada (linhas sem traduzir) fica só na memória, não vai pro disco
+                try:
+                    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                    self._path(key).write_text(json.dumps({"map": mapping, "src": src}, ensure_ascii=False), "utf8")
+                except OSError:
+                    pass
             with self._lock:
                 self._mem[key] = (mapping, src)
             log.info("tradução %s (%s→%s, %s): %d linhas em %.1fs", media.get("title"), src, target, provider,
@@ -297,6 +321,24 @@ class _Worker:
 
 
 _worker = _Worker()
+
+
+def clear_cache() -> int:
+    """Apaga os caches de tradução (tr_*.json em CACHE_DIR) e limpa o cache em memória. Devolve quantos apagou."""
+    n = 0
+    try:
+        for p in CACHE_DIR.glob("tr_*.json"):
+            try:
+                p.unlink()
+                n += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    with _worker._lock:
+        _worker._mem.clear()
+        _worker._errors.clear()
+    return n
 
 
 def for_lyrics(lyr, media: dict | None, cfg) -> Translation | None:

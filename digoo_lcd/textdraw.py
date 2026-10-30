@@ -68,11 +68,11 @@ def _font_for(base_path: str, ch: str) -> str | None:
     return None
 
 
-def runs(text: str, font) -> list[tuple[str, object]]:
-    """[(pedaço, fonte)] — vazio se nada precisar de troca é tratado por quem chama."""
-    base = getattr(font, "path", None)
-    if not base or not text:
-        return [(text, font)]
+@lru_cache(maxsize=512)
+def _runs_struct(text: str, base: str) -> tuple[tuple[str, str], ...]:
+    """Divisão da string em [(pedaço, caminho_da_fonte)] — cacheada: a divisão e a sondagem dos fallbacks
+    (has_glyph por caractere, até 12 fontes) não mudam de um quadro para o outro. Independe do tamanho:
+    has_glyph sempre sonda em 24px, então a chave é só (texto, fonte base)."""
     out: list[list] = []
     for ch in text:
         if ord(ch) in _DROP:
@@ -90,10 +90,18 @@ def runs(text: str, font) -> list[tuple[str, object]]:
             out[-1][0] += ch
         else:
             out.append([ch, p])
-    res = []
-    for s, p in out:
-        f = font if p == base else (_sized(p, int(font.size)) or font)
-        res.append((s, f))
+    return tuple((s, p) for s, p in out)
+
+
+def runs(text: str, font) -> list[tuple[str, object]]:
+    """[(pedaço, fonte)] — vazio se nada precisar de troca é tratado por quem chama."""
+    base = getattr(font, "path", None)
+    if not base or not text:
+        return [(text, font)]
+    # a divisão vem do cache; aqui só mapeia caminho->fonte no tamanho/peso do chamador (font p/ a base,
+    # _sized já lru_cache p/ os fallbacks), então o peso correto é preservado sem recomputar nada.
+    res = [(s, font if p == base else (_sized(p, int(font.size)) or font))
+           for s, p in _runs_struct(text, base)]
     return res or [("", font)]
 
 

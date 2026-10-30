@@ -10,7 +10,44 @@ from logging.handlers import RotatingFileHandler
 from . import APP_NAME, config as config_mod
 from .config import config_dir
 
-SERVER_NAME = "DigooLCDStudio-single-instance"
+SERVER_BASE = "DigooLCDStudio-single-instance"
+
+
+def _user_scope() -> str:
+    """SID do usuário atual, para escopar o named pipe por usuário (evita que outra conta ocupe o nome)."""
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        advapi32 = ctypes.windll.advapi32
+        kernel32 = ctypes.windll.kernel32
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+            raise OSError("OpenProcessToken")
+        try:
+            size = wintypes.DWORD(0)
+            advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))  # TokenUser
+            buf = ctypes.create_string_buffer(size.value)
+            if not advapi32.GetTokenInformation(token, 1, buf, size, ctypes.byref(size)):
+                raise OSError("GetTokenInformation")
+            sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]  # TOKEN_USER.User.Sid
+            str_ptr = ctypes.c_wchar_p()
+            if not advapi32.ConvertSidToStringSidW(ctypes.c_void_p(sid_ptr), ctypes.byref(str_ptr)):
+                raise OSError("ConvertSidToStringSid")
+            try:
+                return str_ptr.value or "default"
+            finally:
+                kernel32.LocalFree(str_ptr)
+        finally:
+            kernel32.CloseHandle(token)
+    except Exception:
+        # fallback: nome de usuário (escopa por conta, menos único que o SID)
+        import getpass
+
+        try:
+            return getpass.getuser()
+        except Exception:
+            return "default"
 
 
 class _LogHandler(RotatingFileHandler):
@@ -109,7 +146,8 @@ def diagnostics(video: str | None) -> int:
         lines.append(f"PyAV: ERRO {exc}")
     out = config_dir() / "diagnostico.txt"
     out.write_text("\n".join(lines), encoding="utf8")
-    print("\n".join(lines))
+    if sys.stdout is not None:  # chamado pela interface (sem console) o stdout é None
+        print("\n".join(lines))
     return 0
 
 
@@ -133,7 +171,7 @@ def main() -> int:
     if args.diagnostico is not None:
         return diagnostics(args.diagnostico or None)
 
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, QTimer
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtWidgets import QApplication
 
@@ -143,19 +181,22 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
 
+    # nome do pipe escopado ao usuário (SID): no PC multiusuário outra conta não ocupa o nome
+    server_name = f"{SERVER_BASE}-{_user_scope()}"
+
     # Instância única: se já está aberto, só pede para a janela aparecer.
     sock = QLocalSocket()
-    sock.connectToServer(SERVER_NAME)
+    sock.connectToServer(server_name)
     if sock.waitForConnected(300):
         sock.write(b"show")
         sock.flush()
         sock.waitForBytesWritten(300)
         return 0
-    QLocalServer.removeServer(SERVER_NAME)
+    QLocalServer.removeServer(server_name)
     server = QLocalServer()
     # o atalho abre sem administrador: o "canal" precisa aceitar quem não está elevado
     server.setSocketOptions(QLocalServer.SocketOption.WorldAccessOption)
-    server.listen(SERVER_NAME)
+    server.listen(server_name)
 
     from .engine import Engine
     from .gui import MainWindow
@@ -164,10 +205,9 @@ def main() -> int:
 
     cfg = config_mod.load()
     log.info("iniciando (admin=%s)", is_admin())
+    # abertura rápida: só cria os objetos (barato) e pinta a janela; o trabalho pesado vem logo depois.
     hub = SensorHub(cfg.sensor_interval)
-    hub.start()
     engine = Engine(cfg, hub)
-    engine.start()
 
     win = MainWindow(cfg, engine, hub)
 
@@ -189,6 +229,18 @@ def main() -> int:
 
     if not (args.minimized or cfg.start_minimized):
         win.show()
+
+    def _boot():
+        # inicialização pesada depois que a janela já pintou: sobe o sensorhelper e conecta à tela
+        hub.start()
+        engine.start()
+        # conserta a tarefa de início com o Windows se o app foi movido de pasta (roda schtasks: em thread)
+        import threading as _th
+
+        from . import system as _system
+        _th.Thread(target=_system.reconcile_autostart, daemon=True).start()
+
+    QTimer.singleShot(0, _boot)
 
     def shutdown():
         log.info("encerrando")

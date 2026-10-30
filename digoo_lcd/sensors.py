@@ -117,6 +117,7 @@ class SensorHub:
         self._raw_time = 0.0
         self._metrics: dict = {}
         self._history = {k: deque(maxlen=HISTORY_LEN) for k in HISTORY_KEYS}
+        self._history_lists: dict = {}   # montado no produtor (_sample_loop), lido pronto em snapshot()
         self._stop = threading.Event()
         self._proc: subprocess.Popen | None = None
         self._nvml: _Nvml | None = None
@@ -148,6 +149,18 @@ class SensorHub:
                 p.terminate()
             except Exception:
                 pass
+            try:
+                p.stdout.close()   # thread leitora pode levantar ValueError: cai no backoff de _helper_loop
+            except Exception:
+                pass
+            try:
+                p.wait(timeout=2)
+            except Exception:
+                try:
+                    p.kill()
+                    p.wait()
+                except Exception:
+                    pass
 
     # -- helper (LibreHardwareMonitor) -----------------------------------
     def _helper_loop(self) -> None:
@@ -255,6 +268,8 @@ class SensorHub:
                     for k in HISTORY_KEYS:
                         v = m.get(k)
                         self._history[k].append(v if v is not None else float("nan"))
+                    # copia o histórico uma vez aqui (~1x/s) em vez de a cada quadro em snapshot()
+                    self._history_lists = {k: list(v) for k, v in self._history.items()}
             except Exception:
                 log.exception("erro ao amostrar sensores")
             self._stop.wait(self.interval)
@@ -262,7 +277,7 @@ class SensorHub:
     def snapshot(self) -> dict:
         with self._lock:
             m = dict(self._metrics)
-            m["history"] = {k: list(v) for k, v in self._history.items()}
+            m["history"] = self._history_lists
         now = dt.datetime.now()
         m["now"] = now
         return m

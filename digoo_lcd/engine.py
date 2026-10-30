@@ -114,6 +114,10 @@ class Engine(threading.Thread):
         self._mlayer_key = None
         self.layer_rects: dict = {}     # onde cada camada está na tela (para arrastar na prévia)
         self._timeouts: list[float] = []
+        self._io_paused = False           # trava escritas da keepalive durante drop/recuperação
+        self._music_on = False            # resultado de _music_needed reaproveitado no quadro
+        self._backoff = RECONNECT_DELAY   # espaça as tentativas quando a porta está presente-mas-falha
+        self._last_port: str | None = None
         self._viz = music.AudioViz()
         self._mstate = music.MediaState()
         self._media_now: dict | None = None
@@ -164,26 +168,21 @@ class Engine(threading.Thread):
         p = self.panel
         if p is None or len(self._timeouts) > 4:
             return False
+        self._io_paused = True  # a keepalive não pode reinjetar bytes no meio da limpeza da porta
         try:
-            ser = p._serial
-            if hasattr(ser, "cancel_write"):
-                ser.cancel_write()
-            ser.reset_output_buffer()
-            time.sleep(0.15)
-            p.clear()
-            time.sleep(0.2)
-            p.drain_input()
-            p.keepalive(force=True)
+            p.recover()
             self._last_hash = None
             self._last_obj = None
             return True
         except Exception:
             return False
+        finally:
+            self._io_paused = False
 
     def _keepalive_loop(self) -> None:
         while not self._halt.is_set():
             p = self.panel
-            if p is not None and not self.paused:
+            if p is not None and not self.paused and not self._io_paused:
                 try:
                     p.keepalive()
                 except Exception:
@@ -202,14 +201,29 @@ class Engine(threading.Thread):
             self._handle_commands()
 
             if not self.paused and self.panel is None and time.monotonic() >= next_try:
-                if not self._connect(cfg):
+                port = find_panel()
+                if port != self._last_port:  # porta sumiu ou reapareceu: volta ao retry rápido
+                    self._backoff = RECONNECT_DELAY
+                    self._last_port = port
+                if self._connect(cfg, port):
+                    self._backoff = RECONNECT_DELAY
+                elif port:
+                    # porta presente-mas-falha (clássico logo após restart): espaça p/ não martelar
+                    next_try = time.monotonic() + self._backoff
+                    self._backoff = min(self._backoff * 2, 15.0)
+                else:
                     next_try = time.monotonic() + RECONNECT_DELAY
 
             t0 = time.monotonic()
             try:
-                self._viz.update(self.hub.audio_snapshot())
-                self._media_now = self.hub.media_snapshot()
-                self._mstate.update(self._media_now)
+                if self._music_on:
+                    self._viz.update(self.hub.audio_snapshot())
+                # cartão "tocando agora" só precisa do snapshot de mídia quando está habilitado
+                if cfg.music_card in ("sempre", "troca") or self._music_theme_on(cfg):
+                    self._media_now = self.hub.media_snapshot()
+                    self._mstate.update(self._media_now)
+                else:
+                    self._media_now = None
                 sources.AUDIO_BASS[0] = self._viz.bass if cfg.music_react else 0.0
                 img = self._compose(cfg)
                 img = self._music_layers(cfg, img)
@@ -223,6 +237,7 @@ class Engine(threading.Thread):
             if self.panel is not None and not self.paused and img is not None:
                 try:
                     self._sync_brightness(cfg)
+                    self.panel.keepalive(force=True)  # 0x11 logo antes de um quadro possivelmente lento: compra a janela inteira
                     self._send(cfg, img)
                     self.panel.keepalive()
                     self.panel.drain_input()
@@ -269,7 +284,8 @@ class Engine(threading.Thread):
         self.hub.pump_sensor = cfg.pump_sensor
         self.hub.fan_sensor = cfg.fan_sensor
         self.hub.interval = max(0.25, float(cfg.sensor_interval))
-        self.hub.set_audio(self._music_needed(cfg))
+        self._music_on = self._music_needed(cfg)  # reaproveitado no quadro para não rodar o viz/mídia à toa
+        self.hub.set_audio(self._music_on)
         self.hub.set_gpu_fan(int(cfg.gpu_fan or 0))
 
     def _handle_commands(self) -> None:
@@ -292,8 +308,9 @@ class Engine(threading.Thread):
             except Exception as exc:
                 log.warning("comando %s falhou: %s", cmd, exc)
 
-    def _connect(self, cfg: Config) -> bool:
-        port = find_panel()
+    def _connect(self, cfg: Config, port: str | None = None) -> bool:
+        if port is None:
+            port = find_panel()
         if not port:
             self.status = "tela não encontrada — confira o cabo USB do watercooler"
             return False
@@ -307,7 +324,7 @@ class Engine(threading.Thread):
                 self.status = f"não abriu {port}: {exc}"
             return False
         try:
-            info = panel.connect()
+            info = panel.connect(probe_timeout=1.5)  # sondagem curta: não trava o loop ~3,3 s numa porta que não responde
             try:
                 panel.set_brightness(100)
                 time.sleep(0.1)
@@ -326,15 +343,21 @@ class Engine(threading.Thread):
         self.brightness_now = -1
         self.quality = cfg.jpeg_quality
         self._last_hash = None
+        self._timeouts = []  # nova conexão começa com o orçamento cheio de recuperações
         self.status = f"conectado em {port}"
         log.info("conectado: %s %s fw %s", port, info.model, info.version)
         return True
 
     def _drop(self, status: str, release: bool = False) -> None:
-        if self.panel is not None:
-            self.panel.close(release=release)
-        self.panel = None
+        self._io_paused = True  # a keepalive não pode escrever enquanto a porta é fechada
+        try:
+            if self.panel is not None:
+                self.panel.close(release=release)
+        finally:
+            self.panel = None
+            self._io_paused = False
         self.connected = False
+        self._timeouts = []  # cada reconexão recomeça com o orçamento cheio de recuperações (evita o laço reconecta/engasga/desconecta)
         self.status = status
 
     def _shutdown(self) -> None:

@@ -38,7 +38,7 @@ BAUD = 2_000_000
 MAGIC = b"\x55\xaa"
 CLEAR_SEQUENCE = b"\xff\xd9\xff\xd9"
 CLEAR_TAIL = b"\x00\x00\x00\x00"
-KEEPALIVE_INTERVAL = 1.5
+KEEPALIVE_INTERVAL = 1.0  # folga contra jitter de agendamento (a tela exige ~1,5 s)
 
 
 class Opcode:
@@ -182,8 +182,8 @@ class Panel:
 
     def __init__(self, port: str):
         self.port = port
-        # 1,5 s: se a tela engasgar, detecta rápido e destrava antes de ela voltar para a tela de fábrica
-        self._serial = serial.Serial(port, BAUD, timeout=0.05, write_timeout=1.5)
+        # 0,5 s: um write preso estoura rápido e a thread de keepalive recupera o lock a tempo (dentro da janela de 1,5 s)
+        self._serial = serial.Serial(port, BAUD, timeout=0.05, write_timeout=0.5)
         self.info = PanelInfo()
         self._last_keepalive = 0.0
         self._lock = threading.RLock()  # quadro e keepalive vêm de threads diferentes: nunca se misturam
@@ -234,10 +234,10 @@ class Panel:
         self._write(CLEAR_SEQUENCE)
         self._write(CLEAR_TAIL)
 
-    def connect(self) -> PanelInfo:
+    def connect(self, probe_timeout: float = 3.0) -> PanelInfo:
         self.clear()
         time.sleep(0.3)
-        reply = self.command(Opcode.GET_DEVICE_INFO, reply=True) or {}
+        reply = self.command(Opcode.GET_DEVICE_INFO, reply=True, timeout=probe_timeout) or {}
         data = reply.get("data") or reply
         self.info = PanelInfo(
             width=int(data.get("width", 480)),
@@ -261,11 +261,27 @@ class Panel:
         self.command(Opcode.SET_BRIGHTNESS, bytes([max(0, min(100, int(level)))]))
 
     def keepalive(self, force: bool = False) -> None:
+        # checa antes do lock: a thread de keepalive nem bloqueia na entrada quando não há nada a enviar
+        if not force and time.monotonic() - self._last_keepalive < KEEPALIVE_INTERVAL:
+            return
         with self._lock:
             now = time.monotonic()
             if force or now - self._last_keepalive >= KEEPALIVE_INTERVAL:
                 self.command(Opcode.KEEPALIVE)
                 self._last_keepalive = now
+
+    def recover(self) -> None:
+        """Destrava a tela sem desconectar: aborta o quadro pela metade, limpa o buffer de saída e reinjeta o
+        keepalive — tudo sob o mesmo lock, para não colidir com um write de keepalive em andamento."""
+        with self._lock:
+            if hasattr(self._serial, "cancel_write"):
+                self._serial.cancel_write()
+            self._serial.reset_output_buffer()
+            time.sleep(0.15)
+            self.clear()
+            time.sleep(0.2)
+            self.drain_input()
+            self.keepalive(force=True)
 
     def restart(self) -> None:
         self.command(Opcode.RESTART)
@@ -286,6 +302,7 @@ class Panel:
         except Exception:
             pass
         try:
-            self._serial.close()
+            with self._lock:  # não fechar enquanto a keepalive ainda escreve sob o lock
+                self._serial.close()
         except Exception:
             pass

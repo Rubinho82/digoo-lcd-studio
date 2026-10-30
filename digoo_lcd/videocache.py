@@ -78,10 +78,8 @@ def request(src: Path, fit: str, rotation: int) -> None:
 
 def _run():
     while True:
-        try:
-            src, fit, rot, dst = _jobs.get(timeout=30)
-        except queue.Empty:
-            return
+        # bloqueio permanente: worker daemon vivo pelo processo, sem corrida com request()
+        src, fit, rot, dst = _jobs.get()
         t0 = time.time()
         try:
             n = _convert(src, fit, rot, dst)

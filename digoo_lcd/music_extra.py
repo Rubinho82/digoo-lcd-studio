@@ -73,6 +73,7 @@ def _lyr_state(x):
     if lyr is None:
         return None, "", None
     msg = {"buscando": "Procurando a letra…", "sem": "Letra não encontrada",
+           "erro": "Sem conexão para a letra — tento de novo",
            "instrumental": "♪  Instrumental  ♪", "desligado": "Letras desligadas na aba Música"}.get(lyr.state)
     if msg or not lyr.lines:
         return None, msg or "Letra não encontrada", None

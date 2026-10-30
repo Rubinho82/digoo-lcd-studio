@@ -15,6 +15,11 @@ from .textdraw import Draw
 W = H = 480
 SS = 2  # supersampling dos anéis/arcos
 
+# buffer de supersampling 960x960 compartilhado: criado uma vez e reaproveitado entre quadros/temas.
+# _render_lock serializa todo o desenho, então um buffer único é seguro (evita realocar ~3,6 MB por quadro).
+_SHARED_LAYER = None
+_SHARED_LD = None
+
 FONT_DIR = resource_dir() / "assets" / "fonts"
 WIN_FONTS = Path(r"C:\Windows\Fonts")
 
@@ -224,7 +229,7 @@ def _load_bg(path: str, mtime: float) -> Image.Image | None:
 
 def apply_scrim(img: Image.Image, scrim: float) -> Image.Image:
     if scrim <= 0:
-        return img
+        return img.copy()  # cópia: o Canvas desenha in place; sem isso sujaria o Image do @lru_cache de _load_bg
     return Image.blend(img, Image.new("RGB", img.size, (0, 0, 0)), max(0.0, min(0.95, scrim)))
 
 
@@ -304,9 +309,13 @@ class Canvas:
 
     # -- camada supersampled para arcos ---------------------------------
     def _layer_draw(self):
+        global _SHARED_LAYER, _SHARED_LD
         if self._layer is None:
-            self._layer = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
-            self._ld = Draw(self._layer, "RGBA")
+            if _SHARED_LAYER is None:  # aloca uma vez; já nasce limpo e o flush() o devolve limpo
+                _SHARED_LAYER = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
+                _SHARED_LD = Draw(_SHARED_LAYER, "RGBA")
+            self._layer = _SHARED_LAYER
+            self._ld = _SHARED_LD
         return self._ld
 
     def arc(self, cx, cy, r, width, start, end, color, alpha=255, caps=True):
@@ -355,6 +364,7 @@ class Canvas:
             # média 2x2 = antialiasing clássico de supersampling, 4x mais rápido que Lanczos
             small = self._layer.reduce(SS)
             self.img.paste(small, (0, 0), small)
+            self._layer.paste((0, 0, 0, 0), (0, 0, W * SS, H * SS))  # limpa o buffer compartilhado p/ reuso
             self._layer = None
             self._ld = None
             self.d = Draw(self.img, "RGBA")

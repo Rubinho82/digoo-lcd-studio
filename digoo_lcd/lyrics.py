@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -26,7 +27,7 @@ API = "https://lrclib.net/api"
 UA = "DigooLCDStudio (https://github.com/Rubinho82/digoo-lcd-studio)"
 CACHE_DIR = config_dir() / "cache" / "lyrics"
 NOT_FOUND_RETRY = 3 * 86400   # letra que não existia: tenta de novo depois de 3 dias
-ERROR_RETRY = 60              # falha de rede: tenta de novo em 1 minuto
+ERROR_RETRY = 15              # falha de rede: janela curta para um timeout pontual ser tentado de novo logo
 
 _BROWSERS = ("chrome", "msedge", "firefox", "opera", "brave", "vivaldi")
 _JUNK = re.compile(
@@ -39,7 +40,8 @@ _LRC = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
 
 
 class Lyrics:
-    """state: buscando | ok | sem | instrumental. lines = [(segundos, texto)]."""
+    """state: buscando | ok | sem | instrumental | erro. lines = [(segundos, texto)].
+    'sem' = a música não tem letra; 'erro' = falha de rede ao buscar (distinto de 'sem')."""
 
     def __init__(self, state: str, lines=None, synced: bool = False):
         self.state = state
@@ -130,6 +132,10 @@ def _get(path: str, params: dict):
             if exc.code < 500 or attempt == 2:
                 raise
             time.sleep(1.5 * (attempt + 1))  # o servidor devolve 503 de vez em quando; na hora seguinte passa
+        except (urllib.error.URLError, socket.timeout):  # HTTPError é subclasse: capturar depois
+            if attempt == 2:  # queda de conexão ou timeout: tenta de novo algumas vezes antes de desistir
+                raise
+            time.sleep(1.0 * (attempt + 1))
 
 
 def _pick(results, duration: float):
@@ -204,7 +210,7 @@ class _Finder:
             if hit is not None:
                 return hit
             if time.monotonic() - self._errors.get(k, -1e9) < ERROR_RETRY:
-                return Lyrics("sem")
+                return Lyrics("erro")  # falha de rede recente: distinto de "sem" (música sem letra)
             disk = self._load(k)
             if disk is not None:
                 self._mem[k] = disk

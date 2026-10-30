@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from . import APP_NAME, __version__, config as config_mod, render, system
 from .config import Config, METRICS, config_dir, resource_dir
 from .effects import effect_label, is_effect
-from .engine import Engine
+from .engine import Engine, in_night_window
 from .gui_library import LibraryTab
 from .sensors import SensorHub, pawnio_installed
 from .sources import MEDIA_EXT, list_monitors
@@ -103,6 +103,8 @@ class WheelGuard(QObject):
 class _Signals(QObject):
     pawnio_progress = Signal(float)
     pawnio_done = Signal(str)
+    diag_done = Signal(str)
+    update_found = Signal(str)
 
 
 class MainWindow(QMainWindow):
@@ -116,6 +118,8 @@ class MainWindow(QMainWindow):
         self._sig = _Signals()
         self._sig.pawnio_progress.connect(self._on_pawnio_progress)
         self._sig.pawnio_done.connect(self._on_pawnio_done)
+        self._sig.diag_done.connect(self._on_diag_done)
+        self._sig.update_found.connect(self._on_update_found)
 
         self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.setWindowIcon(QIcon(str(ICON_PATH)))
@@ -127,6 +131,7 @@ class MainWindow(QMainWindow):
 
         self._save_timer = QTimer(self, singleShot=True, interval=600, timeout=self._save)
         self._thumb_timer = QTimer(self, singleShot=True, interval=700, timeout=self._refresh_thumbs)
+        self._pawnio_notified = False
 
         root = QWidget(objectName="root")
         self.setCentralWidget(root)
@@ -147,9 +152,16 @@ class MainWindow(QMainWindow):
         # na bandeja: devolve ao Windows a memória que a interface não está usando
         self._trim_timer = QTimer(self, interval=30000, timeout=self._trim_memory)
         self._trim_timer.start()
+        # música: timer único criado aqui (não dentro de _tab_music) para não acumular a cada importação de config
+        self._music_timer = QTimer(self, interval=1000, timeout=self._update_music_status)
+        self._music_timer.start()
+        # checagem de atualização: no máximo 1x/dia, em segundo plano
+        self._update_timer = QTimer(self, interval=24 * 60 * 60 * 1000, timeout=self._check_update_bg)
+        self._update_timer.start()
         QTimer.singleShot(2500, self._refresh_thumbs)
         QTimer.singleShot(3000, self._refresh_fan_choices)
-        QTimer.singleShot(8000, self._update_pawnio_label)
+        QTimer.singleShot(8000, self._pawnio_check)
+        QTimer.singleShot(12000, self._check_update_bg)
         self._sync_mode_buttons()
 
     # ==================================================================
@@ -161,12 +173,14 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(10)
+        self._pawnio_banners = []   # recomeça a lista (esta função roda de novo ao importar config)
 
         t = QLabel(APP_NAME, objectName="title")
         v.addWidget(t)
         self.lbl_device = QLabel("procurando a tela…", objectName="muted")
         self.lbl_device.setWordWrap(True)
         v.addWidget(self.lbl_device)
+        v.addWidget(self._make_pawnio_banner())
 
         frame = QFrame(objectName="preview")
         frame.setFixedSize(400, 400)
@@ -182,13 +196,19 @@ class MainWindow(QMainWindow):
         v.addWidget(self.lbl_stats)
 
         g = QGroupBox("Brilho")
-        gl = QHBoxLayout(g)
+        gv = QVBoxLayout(g)
+        gl = QHBoxLayout()
         self.sld_brightness = QSlider(Qt.Horizontal, minimum=0, maximum=100, value=self.cfg.brightness)
         self.lbl_brightness = QLabel(f"{self.cfg.brightness}%")
         self.lbl_brightness.setFixedWidth(42)
         self.sld_brightness.valueChanged.connect(self._on_brightness)
         gl.addWidget(self.sld_brightness)
         gl.addWidget(self.lbl_brightness)
+        gv.addLayout(gl)
+        # aviso quando o modo noturno está no comando (senão o slider parece "não funcionar")
+        self.lbl_night_note = QLabel("", objectName="muted", wordWrap=True)
+        self.lbl_night_note.setVisible(False)
+        gv.addWidget(self.lbl_night_note)
         v.addWidget(g)
 
         row = QHBoxLayout()
@@ -249,6 +269,7 @@ class MainWindow(QMainWindow):
     def _tab_themes(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
+        v.addWidget(self._make_pawnio_banner())
         g = QGroupBox("Onde mostrar o tema")
         gl = QGridLayout(g)
         self.rb_alone = QRadioButton("Sozinho na tela")
@@ -305,6 +326,7 @@ class MainWindow(QMainWindow):
         self.preview.installEventFilter(self)
         self.preview.setMouseTracking(True)
         self._drag = None
+        self._drag_started = False
 
         v.addWidget(QLabel("Clique num tema para usar na tela. As miniaturas mostram seus dados de verdade.", objectName="muted"))
         self.theme_list = QListWidget()
@@ -325,6 +347,7 @@ class MainWindow(QMainWindow):
         v.addWidget(self.theme_list, 1)
 
         g = QGroupBox("O que aparece em cada quadro do tema \"Grade 6\"")
+        self.grid_group = g
         gl = QGridLayout(g)
         self.slot_combos = []
         for i in range(6):
@@ -337,7 +360,11 @@ class MainWindow(QMainWindow):
             gl.addWidget(cb, i // 2, (i % 2) * 2 + 1)
             self.slot_combos.append(cb)
         v.addWidget(g)
-        return self._scroll(w)
+        # só aparece quando o tema ativo é a Grade 6 (a seleção inicial não dispara itemClicked)
+        active_theme = self.cfg.overlay_theme if self.cfg.media_overlay else self.cfg.theme
+        g.setVisible(active_theme == "grade")
+        self._themes_scroll = self._scroll(w)
+        return self._themes_scroll
 
     def _on_theme_clicked(self, item: QListWidgetItem):
         key = item.data(Qt.UserRole)
@@ -351,6 +378,10 @@ class MainWindow(QMainWindow):
         else:
             self.cfg.theme = key
             self._set_mode("painel")
+        # a Grade 6 pode entrar como tema ou como sobreposição: o editor dos 6 quadros segue a escolha
+        self.grid_group.setVisible(key == "grade")
+        if key == "grade":
+            self._themes_scroll.ensureWidgetVisible(self.grid_group)
 
     def _current_geometry(self):
         e = self.engine
@@ -406,21 +437,46 @@ class MainWindow(QMainWindow):
             for name in ("musica", "tema"):
                 r = self.engine.layer_rects.get(name)
                 if r and r[0] <= px <= r[0] + r[2] and r[1] <= py <= r[1] + r[3]:
-                    self._set_layout("livre") if self.cfg.layout_mode != "livre" else None
+                    # ainda NÃO troca para "livre": só depois de arrastar um mínimo (clique puro = nada)
                     key = "music" if name == "musica" else "theme"
                     self._drag = (key, px, py, getattr(self.cfg, key + "_x"), getattr(self.cfg, key + "_y"))
+                    self._drag_started = False
                     return True
         elif et == QEvent.MouseMove and self._drag:
             key, sx, sy, x0, y0 = self._drag
             pos = event.position()
-            setattr(self.cfg, key + "_x", int(x0 + pos.x() * k - sx))
-            setattr(self.cfg, key + "_y", int(y0 + pos.y() * k - sy))
+            px, py = pos.x() * k, pos.y() * k
+            if not self._drag_started:
+                if abs(px - sx) < 5 and abs(py - sy) < 5:
+                    return True  # deslocamento pequeno demais: continua sendo um clique
+                self._drag_started = True
+                if self.cfg.layout_mode != "livre":
+                    self._set_layout("livre")
+                # já em "livre": rebaseia a origem na posição atual da camada e do cursor
+                x0, y0 = getattr(self.cfg, key + "_x"), getattr(self.cfg, key + "_y")
+                sx, sy = px, py
+                self._drag = (key, sx, sy, x0, y0)
+            setattr(self.cfg, key + "_x", int(x0 + px - sx))
+            setattr(self.cfg, key + "_y", int(y0 + py - sy))
             self._sync_layout_widgets()
             self._changed()
             return True
         elif et == QEvent.MouseButtonRelease and self._drag:
             self._drag = None
+            self._drag_started = False
             return True
+        elif et == QEvent.MouseMove:
+            # sem arraste em curso: mostra que dá para pegar a camada (cursor de "mãozinha")
+            pos = event.position()
+            px, py = pos.x() * k, pos.y() * k
+            over = False
+            for name in ("musica", "tema"):
+                r = self.engine.layer_rects.get(name)
+                if r and r[0] <= px <= r[0] + r[2] and r[1] <= py <= r[1] + r[3]:
+                    over = True
+                    break
+            self.preview.setCursor(Qt.OpenHandCursor if over else Qt.ArrowCursor)
+            return False
         elif et == QEvent.Wheel:
             pos = event.position()
             px, py = pos.x() * k, pos.y() * k
@@ -783,6 +839,10 @@ class MainWindow(QMainWindow):
         self.cb_tr_show.setCurrentIndex(max(0, self.cb_tr_show.findData(self.cfg.lyrics_show)))
         self.cb_tr_show.currentIndexChanged.connect(lambda _: self._set("lyrics_show", self.cb_tr_show.currentData()))
         fl.addRow("Mostrar", self.cb_tr_show)
+        btn_clear_tr = QPushButton("Limpar cache de tradução")
+        btn_clear_tr.setToolTip("Apaga as traduções já guardadas para elas serem buscadas de novo")
+        btn_clear_tr.clicked.connect(self._clear_tr_cache)
+        fl.addRow("", btn_clear_tr)
         self.lbl_lyr_state = QLabel("", objectName="muted", wordWrap=True)
         fl.addRow("", self.lbl_lyr_state)
         self._sync_tr_widgets()
@@ -855,8 +915,7 @@ class MainWindow(QMainWindow):
                            "enquanto tem som saindo.", objectName="muted", wordWrap=True))
         v.addStretch(1)
 
-        self._music_timer = QTimer(self, interval=1000, timeout=self._update_music_status)
-        self._music_timer.start()
+        # self._music_timer é criado uma única vez no __init__ (não aqui): evita acumular timers a cada importação
         self._music_thumbs_timer = QTimer(self, singleShot=True, interval=500, timeout=self._refresh_music_thumbs)
         QTimer.singleShot(3000, self._refresh_music_thumbs)
         return self._scroll(inner)
@@ -888,6 +947,18 @@ class MainWindow(QMainWindow):
         prov = self.cb_tr_prov.currentData()
         if prov in ("deepl", "claude"):
             self._set(f"{prov}_key", self.ed_tr_key.text().strip())
+
+    def _clear_tr_cache(self):
+        from . import translate
+        try:
+            n = translate.clear_cache()
+        except Exception as exc:
+            self.lbl_lyr_state.setText(f"Não deu para limpar o cache de tradução: {exc}")
+            return
+        if isinstance(n, int):
+            self.lbl_lyr_state.setText(f"Cache de tradução limpo ({n} {'item' if n == 1 else 'itens'}).")
+        else:
+            self.lbl_lyr_state.setText("Cache de tradução limpo.")
 
     def _demo_music(self):
         """Música e som de exemplo para as miniaturas quando nada está tocando."""
@@ -956,6 +1027,7 @@ class MainWindow(QMainWindow):
                 "ok": "Letra encontrada" + (" com o tempo de cada linha." if lyr and lyr.synced else
                                             " (sem tempo: rola pela duração da música)."),
                 "sem": "Não achei a letra desta música.",
+                "erro": "Sem conexão para buscar a letra; tento de novo.",
                 "instrumental": "Esta música é instrumental.",
                 "desligado": "Busca de letras desligada.",
             }.get(lyr.state if lyr else None, ""))
@@ -1074,7 +1146,8 @@ class MainWindow(QMainWindow):
             rl.addWidget(sp)
             self.region_spins.append(sp)
         fl.addRow("Região", rl)
-        self.chk_region.toggled.connect(self._region_changed)
+        self.chk_region.toggled.connect(self._on_region_toggle)
+        self._sync_region_widgets()
 
         self.cb_mfit = QComboBox()
         self.cb_mfit.addItem("Caber inteiro (faixas pretas)", "contain")
@@ -1090,11 +1163,34 @@ class MainWindow(QMainWindow):
         v.addStretch(1)
         return w
 
+    def _sync_region_widgets(self):
+        # os campos X/Y/Largura/Altura só ficam ativos com "Só uma região" marcado
+        on = self.chk_region.isChecked()
+        for sp in self.region_spins:
+            sp.setEnabled(on)
+
+    def _on_region_toggle(self, on: bool):
+        # ao ligar com a região ainda zerada, dá um ponto de partida útil (tamanho do monitor escolhido)
+        if on and (not self.cfg.mirror_region or self.cfg.mirror_region == [0, 0, 480, 480]):
+            try:
+                mons = list_monitors()
+                idx = (self.cb_monitor.currentData() or 1) - 1
+                mon = mons[idx] if 0 <= idx < len(mons) else mons[0]
+                for sp, val in zip(self.region_spins, (0, 0, int(mon["width"]), int(mon["height"]))):
+                    sp.blockSignals(True)
+                    sp.setValue(val)
+                    sp.blockSignals(False)
+            except Exception:
+                log.exception("prefill região")
+        self._sync_region_widgets()
+        self._region_changed()
+
     def _region_changed(self, *_):
         if self.chk_region.isChecked():
             self.cfg.mirror_region = [sp.value() for sp in self.region_spins]
         else:
             self.cfg.mirror_region = []
+        self._sync_region_widgets()
         self._changed()
 
     # -- Sensores -------------------------------------------------------
@@ -1207,6 +1303,39 @@ class MainWindow(QMainWindow):
                    "(github.com/namazso/PawnIO.Setup).")
         self.lbl_pawnio.setText(txt)
         self.btn_pawnio.setVisible(not installed)
+        # faixas de aviso (prévia e aba Temas): só quando falta o driver e a CPU ainda vem "--"
+        show_banner = (not installed) and (not cpu_ok)
+        for b in getattr(self, "_pawnio_banners", []):
+            b.setVisible(show_banner)
+
+    def _pawnio_check(self):
+        """Na inicialização: atualiza rótulo/faixas e, uma vez, avisa na bandeja se faltar o driver."""
+        self._update_pawnio_label()
+        if self._pawnio_notified:
+            return
+        if not pawnio_installed() and self.hub.snapshot().get("cpu_temp") is None:
+            self._pawnio_notified = True
+            self.tray.showMessage(
+                APP_NAME,
+                "Falta o driver PawnIO para ler temperatura de CPU, bomba e ventoinhas (aparecem como \"--\"). "
+                "Clique na faixa de aviso, ou na aba Sensores, para instalar.",
+                QSystemTrayIcon.Warning, 7000)
+
+    def _make_pawnio_banner(self) -> QWidget:
+        """Faixa clicável de aviso do driver PawnIO; começa oculta e some quando a CPU passa a ler."""
+        f = QFrame(objectName="pawnio_banner")
+        f.setStyleSheet("QFrame#pawnio_banner{background:#2A1A20;border:1px solid #5A2433;border-radius:8px;}")
+        h = QHBoxLayout(f)
+        h.setContentsMargins(10, 8, 10, 8)
+        lbl = QLabel("⚠ Temperatura de CPU, bomba e ventoinhas indisponível — falta o driver PawnIO.")
+        lbl.setWordWrap(True)
+        h.addWidget(lbl, 1)
+        btn = QPushButton("Instalar driver…")
+        btn.clicked.connect(self._install_pawnio)
+        h.addWidget(btn, 0)
+        f.setVisible(False)
+        self._pawnio_banners.append(f)
+        return f
 
     def _install_pawnio(self):
         r = QMessageBox.question(
@@ -1248,6 +1377,61 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "PawnIO", "Driver instalado. Os sensores da CPU aparecem em alguns segundos.")
         QTimer.singleShot(6000, self._update_pawnio_label)
         QTimer.singleShot(6000, self._refresh_fan_choices)
+
+    # -- Diagnóstico ----------------------------------------------------
+    def _run_diagnostics(self):
+        if QMessageBox.question(
+                self, "Testar tela e sensores",
+                "Vou pausar a tela por alguns segundos para liberar a porta e testar a tela, os sensores e "
+                "cada tema. No fim abro a pasta com o relatório (diagnostico.txt).\n\nContinuar?") != QMessageBox.Yes:
+            return
+        self._diag_dlg = QProgressDialog("Testando tela e sensores…", None, 0, 0, self)
+        self._diag_dlg.setWindowTitle("Diagnóstico")
+        self._diag_dlg.setMinimumDuration(0)
+        self._diag_dlg.show()
+        # pausa o engine para soltar a porta COM, senão o diagnostics abre 2ª conexão e reporta "tela: ERRO" falso
+        self.engine.command("pause")
+
+        def work():
+            try:
+                from .main import diagnostics
+                deadline = time.monotonic() + 3
+                while not self.engine.paused and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                time.sleep(0.4)  # folga para a porta fechar de fato
+                diagnostics(None)
+                self._sig.diag_done.emit("")
+            except Exception as exc:
+                self._sig.diag_done.emit(str(exc))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_diag_done(self, err: str):
+        if getattr(self, "_diag_dlg", None):
+            self._diag_dlg.close()
+        self.engine.command("resume")  # volta ao conteúdo ao vivo
+        if err:
+            QMessageBox.warning(self, "Diagnóstico", f"Não deu para testar: {err}")
+        else:
+            system.open_folder(config_dir())
+            QMessageBox.information(self, "Diagnóstico", "Pronto. Abri a pasta com o diagnostico.txt.")
+
+    # -- Atualização ----------------------------------------------------
+    def _check_update_bg(self):
+        def work():
+            try:
+                info = system.check_update(__version__)
+            except Exception:
+                log.exception("checar atualização")
+                return
+            if info:
+                self._sig.update_found.emit(str(info))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_found(self, ver: str):
+        self.tray.showMessage(APP_NAME, f"Nova versão disponível: {ver}. Baixe quando quiser no site do projeto.",
+                              QSystemTrayIcon.Information, 6000)
 
     # -- Configurações --------------------------------------------------
     def _tab_settings(self) -> QWidget:
@@ -1320,6 +1504,7 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         for label, fn in (("Limpar cache de vídeos", self._clear_video_cache),
                           ("Exportar config…", self._export_cfg), ("Importar config…", self._import_cfg),
+                          ("Testar tela e sensores", self._run_diagnostics),
                           ("Abrir pasta de dados", lambda: system.open_folder(config_dir()))):
             b = QPushButton(label)
             b.clicked.connect(fn)
@@ -1497,6 +1682,18 @@ class MainWindow(QMainWindow):
         self._changed()
         self.engine.command("brightness")
 
+    def _sync_brightness_night(self):
+        """No horário noturno o engine usa night_brightness: avisa e trava o slider para não parecer quebrado."""
+        night = in_night_window(self.cfg)
+        self.sld_brightness.setEnabled(not night)
+        if night:
+            self.lbl_night_note.setText(
+                f"Modo noturno ativo — usando {self.cfg.night_brightness}% até {self.cfg.night_end}. "
+                "Ajuste em Configurações → Modo noturno.")
+            self.lbl_night_note.setVisible(True)
+        else:
+            self.lbl_night_note.setVisible(False)
+
     def _toggle_pause(self):
         if self.engine.paused:
             self.engine.command("resume")
@@ -1528,6 +1725,7 @@ class MainWindow(QMainWindow):
             self.preview.setPixmap(pil_to_pixmap(img, 360))
 
     def _update_status(self):
+        self._sync_brightness_night()
         e = self.engine
         paused = e.paused
         self.btn_pause.setText("Retomar tela" if paused else "Pausar tela")

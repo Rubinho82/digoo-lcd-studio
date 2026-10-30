@@ -71,37 +71,90 @@ class ProviderError(RuntimeError):
     pass
 
 
+# esperas entre tentativas; o nº de tentativas é len(_RETRY_BACKOFF)+1
+_RETRY_BACKOFF = (0.5, 1.5)
+
+
+def _retry_after(exc: urllib.error.HTTPError, default: float) -> float:
+    # respeita o cabeçalho Retry-After (em segundos) quando vier; senão usa o backoff
+    try:
+        ra = exc.headers.get("Retry-After") if exc.headers else None
+        if ra and ra.strip().isdigit():
+            return min(float(ra.strip()), 30.0)
+    except Exception:
+        pass
+    return default
+
+
 def http_json(url: str, timeout: float = 15) -> dict:
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
-            return json.loads(r.read().decode("utf8"))
-    except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
-            raise ProviderError("chave de API inválida ou ausente") from exc
-        if exc.code == 429:
-            raise ProviderError("muitas buscas seguidas — espere um pouco") from exc
-        raise ProviderError(f"erro HTTP {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise ProviderError(f"sem conexão: {exc.reason}") from exc
+    for attempt in range(len(_RETRY_BACKOFF) + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
+                return json.loads(r.read().decode("utf8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise ProviderError("chave de API inválida ou ausente") from exc
+            # 429/5xx costumam ser passageiros: tenta de novo antes de desistir
+            if (exc.code == 429 or 500 <= exc.code < 600) and attempt < len(_RETRY_BACKOFF):
+                time.sleep(_retry_after(exc, _RETRY_BACKOFF[attempt]))
+                continue
+            if exc.code == 429:
+                raise ProviderError("muitas buscas seguidas — espere um pouco") from exc
+            raise ProviderError(f"erro HTTP {exc.code}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt < len(_RETRY_BACKOFF):
+                time.sleep(_RETRY_BACKOFF[attempt])
+                continue
+            reason = getattr(exc, "reason", exc)
+            raise ProviderError(f"sem conexão: {reason}") from exc
+    raise ProviderError("sem conexão")  # inatingível
 
 
 def http_download(url: str, dest: Path, progress=None, timeout: float = 30) -> Path:
+    # só http/https: bloqueia file:/ftp:/data: vindos de uma media_url manipulada do provedor
+    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+        raise ProviderError("URL de mídia inválida")
     tmp = dest.with_suffix(dest.suffix + ".part")
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r, open(tmp, "wb") as f:
-        total = int(r.headers.get("Content-Length") or 0)
-        done = 0
-        while True:
-            chunk = r.read(65536)
-            if not chunk:
-                break
-            f.write(chunk)
-            done += len(chunk)
-            if progress and total:
-                progress(done / total)
-    tmp.replace(dest)
-    return dest
+    for attempt in range(len(_RETRY_BACKOFF) + 1):
+        have = tmp.stat().st_size if tmp.exists() else 0
+        headers = {"User-Agent": UA}
+        if have:  # já temos parte do arquivo: pede para continuar de onde parou
+            headers["Range"] = f"bytes={have}-"
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
+                # 206 = servidor aceitou retomar; 200 = não suporta Range → recomeça do zero
+                resume = bool(have) and getattr(r, "status", 200) == 206
+                if not resume:
+                    have = 0
+                clen = int(r.headers.get("Content-Length") or 0)
+                total = (have + clen) if clen else 0
+                done = have
+                with open(tmp, "ab" if resume else "wb") as f:
+                    while True:
+                        chunk = r.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        done += len(chunk)
+                        if progress and total:
+                            progress(done / total)
+            tmp.replace(dest)
+            return dest
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416 and tmp.exists():  # Range inválido: joga o .part fora e recomeça
+                tmp.unlink(missing_ok=True)
+            retriable = exc.code in (416, 429) or 500 <= exc.code < 600
+            if not retriable or attempt >= len(_RETRY_BACKOFF):
+                raise ProviderError(f"erro HTTP {exc.code}") from exc
+            time.sleep(_retry_after(exc, _RETRY_BACKOFF[attempt]))
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt >= len(_RETRY_BACKOFF):
+                reason = getattr(exc, "reason", exc)
+                raise ProviderError(f"sem conexão: {reason}") from exc
+            time.sleep(_RETRY_BACKOFF[attempt])
+    return dest  # inatingível
 
 
 def fetch_preview(url: str) -> Path:

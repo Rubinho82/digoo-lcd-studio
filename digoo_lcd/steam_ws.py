@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import winreg
@@ -185,6 +186,29 @@ WS_TYPES = {"": "Todos os tipos", "Video": "Só vídeos", "Scene": "Só cenas", 
 TYPE_PT = {"Video": "Vídeo", "Scene": "Cena", "Web": "Web"}
 
 
+# esperas entre tentativas; um soluço pontual da Steam não deve derrubar a busca inteira
+_WS_BACKOFF = (1.0, 2.0)
+
+
+def _read_url(req: urllib.request.Request, timeout: int) -> bytes:
+    """urlopen com retry curto para 429/5xx/timeout passageiros da Steam."""
+    for attempt in range(len(_WS_BACKOFF) + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
+                return r.read()
+        except urllib.error.HTTPError as exc:
+            if (exc.code == 429 or 500 <= exc.code < 600) and attempt < len(_WS_BACKOFF):
+                time.sleep(_WS_BACKOFF[attempt])
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt < len(_WS_BACKOFF):
+                time.sleep(_WS_BACKOFF[attempt])
+                continue
+            raise
+    raise RuntimeError("inatingível")
+
+
 def _details(ids: list[str]) -> dict[str, dict]:
     if not ids:
         return {}
@@ -195,8 +219,7 @@ def _details(ids: list[str]) -> dict[str, dict]:
         "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/",
         data=urllib.parse.urlencode(form).encode(), headers={"User-Agent": BROWSER_UA})
     try:
-        with urllib.request.urlopen(req, timeout=20, context=SSL_CTX) as r:
-            data = json.loads(r.read().decode("utf8"))
+        data = json.loads(_read_url(req, timeout=20).decode("utf8"))
     except Exception as exc:
         raise ProviderError(f"Steam não respondeu: {exc}") from exc
     return {d["publishedfileid"]: d for d in data.get("response", {}).get("publishedfiledetails", [])
@@ -235,11 +258,15 @@ class Workshop(Provider):
         url = "https://steamcommunity.com/workshop/browse/?" + urllib.parse.urlencode(p)
         req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA, "Accept-Language": "pt-BR,pt;q=0.9"})
         try:
-            with urllib.request.urlopen(req, timeout=20, context=SSL_CTX) as r:
-                html = r.read().decode("utf8", "replace")
+            html = _read_url(req, timeout=20).decode("utf8", "replace")
         except Exception as exc:
             raise ProviderError(f"Workshop não respondeu: {exc}") from exc
         ids = list(dict.fromkeys(re.findall(r"filedetails/\?id=(\d+)", html)))
+        if not ids:
+            # 200 com HTML mas 0 IDs: layout novo, login/Cloudflare ou limite temporário — não é
+            # "busca vazia de verdade"; avisa que a fonte quebrou em vez de mostrar "nada encontrado"
+            raise ProviderError("a Steam respondeu mas não entendi a lista "
+                                "(pode ser limite temporário) — tente de novo")
         det = _details(ids)
         out = []
         for i in ids:
