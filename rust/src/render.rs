@@ -284,6 +284,34 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Círculo com preenchimento e/ou contorno (bulbo do termômetro, mostradores do cronógrafo).
+    pub fn circle(&mut self, cx: f32, cy: f32, r: f32, fill: Option<Color>, outline: Option<(Color, f32)>) {
+        if let Some(col) = fill {
+            self.disc(cx, cy, r, col);
+        }
+        if let Some((col, width)) = outline {
+            let mut pb = PathBuilder::new();
+            pb.push_circle(cx, cy, r);
+            self.stroke(pb, col, width, false);
+        }
+    }
+
+    /// Fatia de pizza preenchida (rastro do feixe do radar).
+    pub fn wedge(&mut self, cx: f32, cy: f32, r: f32, a0: f32, a1: f32, col: Color) {
+        if a1 <= a0 {
+            return;
+        }
+        let mut pb = PathBuilder::new();
+        pb.move_to(cx, cy);
+        let steps = ((a1 - a0).abs() / 3.0).ceil().max(2.0) as usize;
+        for i in 0..=steps {
+            let a = (a0 + (a1 - a0) * i as f32 / steps as f32).to_radians();
+            pb.line_to(cx + r * a.cos(), cy + r * a.sin());
+        }
+        pb.close();
+        self.fill_path(pb, col);
+    }
+
     /// Largura em px de um texto (para caixas que abraçam o texto, como o relógio do tema compacto).
     pub fn text_width(&self, s: &str, size: f32, bold: bool) -> f32 {
         let font = if bold { &self.f.bold } else { &self.f.reg };
@@ -412,6 +440,52 @@ fn blit_text(pm: &mut Pixmap, font: &Font, s: &str, x: f32, y: f32, size: f32, c
     }
 }
 
+/// Preenche um retângulo cru no pixmap (sem AA — look de pixel), misturando por alfa.
+fn px_rect(pm: &mut Pixmap, x: i32, y: i32, w: i32, h: i32, col: Color) {
+    let (pw, ph) = (pm.width() as i32, pm.height() as i32);
+    let (r, g, b, a) = (col.red() * 255.0, col.green() * 255.0, col.blue() * 255.0, col.alpha());
+    let data = pm.data_mut();
+    for yy in y..y + h {
+        for xx in x..x + w {
+            if xx < 0 || yy < 0 || xx >= pw || yy >= ph {
+                continue;
+            }
+            let i = ((yy * pw + xx) * 4) as usize;
+            for (k, cc) in [r, g, b].iter().enumerate() {
+                let bg = data[i + k] as f32;
+                data[i + k] = (bg + (cc - bg) * a) as u8;
+            }
+            let bga = data[i + 3] as f32;
+            data[i + 3] = (bga + (255.0 - bga) * a) as u8;
+        }
+    }
+}
+
+/// Copia um pixmap pequeno ampliado por `scale` (vizinho mais próximo: pixels grandes), misturando por alfa.
+fn blit_scaled(dst: &mut Pixmap, src: &Pixmap, scale: u32) {
+    let (sw, sh) = (src.width(), src.height());
+    let (dw, dh) = (dst.width(), dst.height());
+    let sdata = src.data().to_vec();
+    let ddata = dst.data_mut();
+    for y in 0..dh {
+        for x in 0..dw {
+            let sx = (x / scale).min(sw - 1);
+            let sy = (y / scale).min(sh - 1);
+            let si = ((sy * sw + sx) * 4) as usize;
+            let a = sdata[si + 3] as f32 / 255.0;
+            if a <= 0.0 {
+                continue;
+            }
+            let di = ((y * dw + x) * 4) as usize;
+            for k in 0..3 {
+                let bg = ddata[di + k] as f32;
+                ddata[di + k] = (bg + (sdata[si + k] as f32 - bg) * a) as u8;
+            }
+            ddata[di + 3] = 255;
+        }
+    }
+}
+
 // ---------------------------------------------------------------- temas
 fn temp_str(v: f32) -> String {
     if v.is_nan() { "--".into() } else { format!("{:.0}", v) }
@@ -463,6 +537,96 @@ fn tail(v: &[f32], n: usize) -> &[f32] {
     &v[v.len().saturating_sub(n)..]
 }
 
+/// Valor bruto de uma métrica por nome (NaN p/ as que ainda não coletamos — lote de sensores).
+fn metric_val(m: &Metrics, key: &str) -> f32 {
+    match key {
+        "cpu_temp" => m.cpu_temp,
+        "gpu_temp" => m.gpu_temp,
+        "cpu_load" => m.cpu_load,
+        "gpu_load" => m.gpu_load,
+        "ram_load" => m.ram_load,
+        _ => f32::NAN,
+    }
+}
+
+/// Unidade de exibição por métrica.
+fn metric_unit(key: &str) -> &'static str {
+    match key {
+        k if k.ends_with("temp") => "°C",
+        "gpu_hotspot" => "°C",
+        "cpu_load" | "gpu_load" | "ram_load" => "%",
+        "cpu_clock" | "gpu_clock" => "GHz",
+        "cpu_power" | "gpu_power" => "W",
+        "gpu_vram" => "GB",
+        "net_down" | "net_up" => "MB/s",
+        _ => "",
+    }
+}
+
+/// Valor formatado (só o número) ou "--" quando a métrica ainda não é coletada.
+fn metric_value_str(m: &Metrics, key: &str) -> String {
+    let v = metric_val(m, key);
+    if v.is_nan() {
+        "--".into()
+    } else {
+        format!("{:.0}", v)
+    }
+}
+
+/// Fração 0..1 da métrica (NaN se ausente): temperatura em 20..95 °C, resto é valor/100.
+fn metric_frac(m: &Metrics, key: &str) -> f32 {
+    let v = metric_val(m, key);
+    if v.is_nan() {
+        return f32::NAN;
+    }
+    if key.ends_with("temp") {
+        temp_frac(v)
+    } else {
+        (v / 100.0).clamp(0.0, 1.0)
+    }
+}
+
+/// Fração com NaN tratado como 0 e presa a 0..1 (equivale ao `metric_pct(...) or 0` do Python).
+fn frac0(x: f32) -> f32 {
+    if x.is_nan() {
+        0.0
+    } else {
+        x.clamp(0.0, 1.0)
+    }
+}
+
+/// Histórico de uma métrica por nome (vazio p/ as séries que ainda não guardamos).
+fn hist_of<'h>(h: &'h History, key: &str) -> &'h [f32] {
+    match key {
+        "cpu_temp" => &h.cpu_temp,
+        "cpu_load" => &h.cpu_load,
+        "gpu_temp" => &h.gpu_temp,
+        "gpu_load" => &h.gpu_load,
+        "ram_load" => &h.ram_load,
+        _ => &[],
+    }
+}
+
+/// Arco com degradê de c1 → c2 (pontas arredondadas via caps do stroke).
+fn grad_arc(c: &mut Canvas, cx: f32, cy: f32, r: f32, width: f32, start: f32, end: f32, c1: Color, c2: Color) {
+    if end <= start {
+        return;
+    }
+    let span = end - start;
+    let n = (48.0 * span / 360.0).ceil().max(2.0) as usize;
+    for i in 0..n {
+        let a0 = start + span * i as f32 / n as f32;
+        let a1 = start + span * (i + 1) as f32 / n as f32 + 0.6;
+        c.arc(cx, cy, r, width, a0, end.min(a1), mix(c1, c2, i as f32 / (n - 1).max(1) as f32));
+    }
+}
+
+/// Ponteiro: linha do centro p/ fora com um rabinho atrás (cronógrafo, mostradores).
+fn needle(c: &mut Canvas, cx: f32, cy: f32, ang_deg: f32, length: f32, width: f32, col: Color, tail: f32) {
+    let a = ang_deg.to_radians();
+    c.line(cx - tail * a.cos(), cy - tail * a.sin(), cx + length * a.cos(), cy + length * a.sin(), col, width);
+}
+
 /// Histórico por métrica para os gráficos (sparklines). O laço principal empurra um ponto por quadro.
 /// A ampliação dos sensores (clocks, potência, VRAM, ventoinhas, rede, disco) e mais séries vêm no lote 2.
 pub struct History {
@@ -470,10 +634,17 @@ pub struct History {
     pub gpu_load: Vec<f32>,
     pub cpu_temp: Vec<f32>,
     pub gpu_temp: Vec<f32>,
+    pub ram_load: Vec<f32>,
 }
 impl Default for History {
     fn default() -> Self {
-        History { cpu_load: Vec::new(), gpu_load: Vec::new(), cpu_temp: Vec::new(), gpu_temp: Vec::new() }
+        History {
+            cpu_load: Vec::new(),
+            gpu_load: Vec::new(),
+            cpu_temp: Vec::new(),
+            gpu_temp: Vec::new(),
+            ram_load: Vec::new(),
+        }
     }
 }
 impl History {
@@ -483,6 +654,7 @@ impl History {
         push_cap(&mut self.gpu_load, m.gpu_load);
         push_cap(&mut self.cpu_temp, m.cpu_temp);
         push_cap(&mut self.gpu_temp, m.gpu_temp);
+        push_cap(&mut self.ram_load, m.ram_load);
     }
 }
 fn push_cap(buf: &mut Vec<f32>, v: f32) {
@@ -824,10 +996,330 @@ fn theme_led(c: &mut Canvas, m: &Metrics) {
     c.text(&format!("{:02}:{:02}", clk.h, clk.m), W / 2.0, 452.0, 30.0, rgb(255, 170, 60), true, Anchor::Center);
 }
 
+/// Anel único: um valor gigante no meio de um anel grosso, alternando CPU/GPU a cada 6 s.
+fn theme_anel_unico(c: &mut Canvas, m: &Metrics) {
+    c.gradient_bg();
+    let pal = c.pal;
+    let clk = now();
+    let secs = clk.m as u32 * 60 + clk.s as u32;
+    let gpu = (secs / 6) % 2 == 1;
+    let (label, tk, lk, c1, c2) = if gpu {
+        ("GPU", "gpu_temp", "gpu_load", pal.acc2, pal.acc)
+    } else {
+        ("CPU", "cpu_temp", "cpu_load", pal.acc, pal.acc2)
+    };
+    let frac = frac0(metric_frac(m, tk));
+    c.arc(240.0, 240.0, 206.0, 28.0, 0.0, 360.0, rgba(pal.muted, 38));
+    if frac > 0.0 {
+        grad_arc(c, 240.0, 240.0, 206.0, 28.0, -90.0, -90.0 + 360.0 * frac.max(0.02), c1, c2);
+    }
+    c.text(label, 240.0, 142.0, 34.0, c1, true, Anchor::Center);
+    c.value_unit(250.0, 300.0, &metric_value_str(m, tk), "°C", 150.0, pal.txt, Anchor::Center);
+    c.text(&format!("USO {}", pct(metric_val(m, lk))), 240.0, 350.0, 28.0, pal.muted, false, Anchor::Center);
+    for i in 0..2usize {
+        let x = 228.0 + i as f32 * 24.0;
+        let on = i == gpu as usize;
+        let col = if on { rgba(c1, 255) } else { rgba(pal.muted, 90) };
+        c.disc(x, 395.0, 5.0, col);
+    }
+}
+
+const LIST_ROWS: &[(&str, &str)] = &[
+    ("cpu_temp", "temp"), ("cpu_load", "uso"), ("cpu_clock", "clock"), ("cpu_power", "consumo"),
+    ("gpu_temp", "temp"), ("gpu_hotspot", "memória"), ("gpu_load", "uso"), ("gpu_clock", "clock"),
+    ("gpu_power", "consumo"), ("gpu_vram", "VRAM"), ("ram_load", "RAM"), ("disk_temp", "SSD"),
+    ("net_down", "download"), ("net_up", "upload"),
+];
+
+/// Lista de sensores: tudo de uma vez em linhas, com barrinhas (estilo painel de sensores de PC).
+fn theme_lista(c: &mut Canvas, m: &Metrics) {
+    let pal = c.pal;
+    c.fill(rgb(8, 10, 14));
+    let green = rgb(120, 230, 140);
+    let clk = now();
+    c.text_mono("SENSORES", 18.0, 30.0, 19.0, pal.acc, Anchor::Left);
+    c.text_mono(&format!("{:02}:{:02}", clk.h, clk.m), W - 18.0, 30.0, 19.0, pal.txt, Anchor::Right);
+    c.line(14.0, 44.0, W - 14.0, 44.0, rgba(pal.acc, 120), 2.0);
+    let (mut y, rh) = (62.0f32, 29.0f32);
+    for (i, (key, name)) in LIST_ROWS.iter().enumerate() {
+        let (grp, col) = if key.starts_with("cpu") {
+            ("CPU", pal.acc)
+        } else if key.starts_with("gpu") && *key != "gpu_vram" {
+            ("GPU", pal.acc2)
+        } else {
+            ("", green)
+        };
+        if i % 2 == 0 {
+            c.rrect(12.0, y - rh / 2.0, W - 24.0, rh, rgba(rgb(255, 255, 255), 9));
+        }
+        let title = format!("{} {}", grp, name).trim().to_uppercase();
+        c.text_mono(&title, 22.0, y + 6.0, 19.0, col, Anchor::Left);
+        let unit = metric_unit(key);
+        let vs = metric_value_str(m, key);
+        let right = if unit.is_empty() { vs } else { format!("{} {}", vs, unit) };
+        c.text_mono(&right, W - 22.0, y + 6.0, 19.0, pal.txt, Anchor::Right);
+        let frac = metric_frac(m, key);
+        if !frac.is_nan() {
+            c.bar(210.0, y - 4.0, 130.0, 8.0, frac.clamp(0.0, 1.0), col);
+        }
+        y += rh;
+    }
+}
+
+/// Cartões com gráfico: 6 cartões, cada um com o valor e a curva dos últimos minutos.
+fn theme_cartoes(c: &mut Canvas, m: &Metrics, hist: &History) {
+    c.gradient_bg();
+    c.header("DIGOO");
+    let pal = c.pal;
+    let green = rgb(120, 230, 140);
+    let cards: [(&str, &str, Color, f32, f32); 6] = [
+        ("CPU TEMP", "cpu_temp", pal.acc, 20.0, 100.0),
+        ("CPU USO", "cpu_load", pal.acc, 0.0, 100.0),
+        ("GPU TEMP", "gpu_temp", pal.acc2, 20.0, 100.0),
+        ("GPU USO", "gpu_load", pal.acc2, 0.0, 100.0),
+        ("RAM", "ram_load", green, 0.0, 100.0),
+        ("DOWNLOAD", "net_down", rgb(255, 190, 60), 0.0, f32::NAN),
+    ];
+    for (i, &(label, key, col, vmin, vmax)) in cards.iter().enumerate() {
+        let x0 = 14.0 + (i % 2) as f32 * 230.0;
+        let y0 = 58.0 + (i / 2) as f32 * 140.0;
+        c.round_rect(x0, y0, 222.0, 132.0, 16.0, Some(rgba(rgb(255, 255, 255), 14)), Some((rgba(col, 70), 2.0)));
+        let vals = tail(hist_of(hist, key), 90);
+        let vmax = if vmax.is_nan() {
+            let hi = vals.iter().cloned().filter(|v| !v.is_nan()).fold(0.0f32, f32::max);
+            if hi > 0.0 { hi * 1.15 } else { 1.0 }
+        } else {
+            vmax
+        };
+        c.sparkline(x0 + 10.0, y0 + 76.0, x0 + 212.0, y0 + 122.0, vals, col, vmin, vmax, 45, 2.0);
+        c.text(label, x0 + 14.0, y0 + 26.0, 18.0, col, true, Anchor::Left);
+        let color = if key.ends_with("temp") { temp_color(metric_val(m, key), &pal) } else { pal.txt };
+        c.value_unit(x0 + 14.0, y0 + 74.0, &metric_value_str(m, key), metric_unit(key), 42.0, color, Anchor::Left);
+    }
+}
+
+/// Termômetros: dois tubos de vidro que enchem com a temperatura.
+fn theme_termometro(c: &mut Canvas, m: &Metrics) {
+    c.gradient_bg();
+    c.header("DIGOO");
+    let pal = c.pal;
+    let (top, bot) = (84.0f32, 340.0f32);
+    let glass = Color::from_rgba8(255, 255, 255, 22);
+    let glass_ol = Color::from_rgba8(255, 255, 255, 90);
+    let tubes = [(150.0f32, "CPU", "cpu_temp", "cpu_load", pal.acc), (330.0, "GPU", "gpu_temp", "gpu_load", pal.acc2)];
+    for (x, label, tk, lk, col) in tubes {
+        let t = metric_val(m, tk);
+        let frac = frac0(metric_frac(m, tk));
+        let tc = temp_color(t, &pal);
+        c.round_rect(x - 22.0, top, 44.0, bot + 10.0 - top, 22.0, Some(glass), Some((glass_ol, 2.0)));
+        c.circle(x, bot + 38.0, 44.0, Some(glass), Some((glass_ol, 2.0)));
+        let lvl = bot - (bot - top - 16.0) * frac;
+        c.round_rect(x - 13.0, lvl, 26.0, bot + 20.0 - lvl, 13.0, Some(rgba(tc, 255)), None);
+        c.circle(x, bot + 38.0, 35.0, Some(rgba(tc, 255)), None);
+        c.line(x - 8.0, top + 18.0, x - 8.0, bot - 10.0, Color::from_rgba8(255, 255, 255, 70), 4.0);
+        for k in 0..8 {
+            let yy = bot - (bot - top - 16.0) * (k as f32 * 10.0) / 75.0;
+            let x2 = if k % 2 == 0 { x + 40.0 } else { x + 34.0 };
+            c.line(x + 28.0, yy, x2, yy, Color::from_rgba8(255, 255, 255, 140), 2.0);
+            if k % 2 == 0 {
+                c.text(&format!("{}", 20 + k * 10), x + 46.0, yy + 5.0, 16.0, pal.muted, false, Anchor::Left);
+            }
+        }
+        c.text(&format!("{}°", temp_str(t)), x, bot + 48.0, 30.0, rgb(255, 255, 255), true, Anchor::Center);
+        c.text(label, x - 60.0, 72.0, 26.0, col, true, Anchor::Left);
+        c.text(&format!("USO {}", pct(metric_val(m, lk))), x, 450.0, 22.0, pal.muted, false, Anchor::Center);
+    }
+}
+
+/// Relógio de ponteiros estilo cronógrafo, com mostradores pequenos de CPU, GPU e RAM.
+fn theme_cronografo(c: &mut Canvas, m: &Metrics) {
+    let pal = c.pal;
+    let green = rgb(120, 230, 140);
+    let (cx, cy) = (240.0f32, 240.0f32);
+    c.circle(cx, cy, 222.0, Some(Color::from_rgba8(14, 16, 22, 235)), Some((rgba(pal.muted, 120), 3.0)));
+    let clk = now();
+    for i in 0..60 {
+        let a = (-90.0 + i as f32 * 6.0).to_radians();
+        let r1 = if i % 5 == 0 { 196.0 } else { 206.0 };
+        let col = rgba(if i % 5 == 0 { pal.txt } else { pal.muted }, 230);
+        let w = if i % 5 == 0 { 6.0 } else { 2.0 };
+        c.line(cx + r1 * a.cos(), cy + r1 * a.sin(), cx + 214.0 * a.cos(), cy + 214.0 * a.sin(), col, w);
+    }
+    let subs = [
+        (150.0f32, 250.0f32, "CPU", "cpu_temp", pal.acc),
+        (330.0, 250.0, "GPU", "gpu_temp", pal.acc2),
+        (240.0, 350.0, "RAM", "ram_load", green),
+    ];
+    for (sx, sy, _label, key, col) in subs {
+        c.arc(sx, sy, 52.0, 4.0, 135.0, 405.0, rgba(pal.muted, 90));
+        let frac = frac0(metric_frac(m, key));
+        c.arc(sx, sy, 52.0, 4.0, 135.0, 135.0 + 270.0 * frac, rgba(col, 255));
+        needle(c, sx, sy, 135.0 + 270.0 * frac, 44.0, 3.0, col, 8.0);
+    }
+    for (num, x, y) in [("12", 240.0f32, 78.0f32), ("3", 410.0, 250.0), ("9", 70.0, 250.0)] {
+        c.text(num, x, y, 30.0, pal.txt, true, Anchor::Center);
+    }
+    for (sx, sy, label, key, col) in subs {
+        c.text(label, sx, sy - 14.0, 15.0, col, true, Anchor::Center);
+        c.text(&format!("{}{}", metric_value_str(m, key), metric_unit(key)), sx, sy + 30.0, 17.0, pal.txt, true, Anchor::Center);
+    }
+    let wd = WEEK3[clk.wday as usize];
+    c.text(&format!("{} {:02}", wd, clk.day), 240.0, 156.0, 18.0, pal.acc, true, Anchor::Center);
+    let mins = clk.m as f32 + clk.s as f32 / 60.0;
+    let hrs = (clk.h % 12) as f32 + mins / 60.0;
+    needle(c, cx, cy, -90.0 + hrs * 30.0, 112.0, 10.0, pal.txt, 16.0);
+    needle(c, cx, cy, -90.0 + mins * 6.0, 170.0, 6.0, pal.txt, 20.0);
+    needle(c, cx, cy, -90.0 + clk.s as f32 * 6.0, 196.0, 2.0, pal.acc, 30.0);
+    c.disc(cx, cy, 9.0, rgba(pal.acc, 255));
+    c.disc(cx, cy, 3.0, Color::from_rgba8(20, 20, 24, 255));
+}
+
+/// Radar: o feixe gira e cada sensor é um ponto — quanto mais longe do centro, mais alto o valor.
+fn theme_radar(c: &mut Canvas, m: &Metrics) {
+    let pal = c.pal;
+    let green = pal.acc;
+    let (cx, cy, rr) = (240.0f32, 254.0f32, 196.0f32);
+    c.disc(cx, cy, rr, Color::from_rgba8(0, 18, 14, 220));
+    for r in [rr / 3.0, 2.0 * rr / 3.0, rr] {
+        c.circle(cx, cy, r, None, Some((rgba(green, 90), 2.0)));
+    }
+    c.line(cx - rr, cy, cx + rr, cy, rgba(green, 60), 1.0);
+    c.line(cx, cy - rr, cx, cy + rr, rgba(green, 60), 1.0);
+    let clk = now();
+    let t = clk.s as f32 + clk.ms as f32 / 1000.0;
+    let sweep = (t * 90.0) % 360.0;
+    for k in 0..18 {
+        let a1 = sweep - k as f32 * 3.0;
+        let alpha = (110.0 * (1.0 - k as f32 / 18.0).powi(2)) as u8;
+        c.wedge(cx, cy, rr, a1 - 3.0, a1, rgba(green, alpha));
+    }
+    let a = sweep.to_radians();
+    c.line(cx, cy, cx + rr * a.cos(), cy + rr * a.sin(), rgba(green, 255), 3.0);
+    let pts = [
+        ("CPU", "cpu_load", 200.0f32),
+        ("GPU", "gpu_load", 300.0),
+        ("RAM", "ram_load", 60.0),
+        ("VRAM", "gpu_vram", 130.0),
+        ("CPU", "cpu_temp", 250.0),
+        ("GPU", "gpu_temp", 20.0),
+    ];
+    for (label, key, ang) in pts {
+        let frac = frac0(metric_frac(m, key)).max(0.05);
+        let radius = rr * frac * 0.92;
+        let px = cx + radius * ang.to_radians().cos();
+        let py = cy + radius * ang.to_radians().sin();
+        let since = ((sweep - ang) % 360.0 + 360.0) % 360.0;
+        let glow = (1.0 - since / 300.0).max(0.3);
+        let base = if since < 20.0 { rgb(255, 255, 255) } else { green };
+        let col = mix(rgb(0, 0, 0), base, glow);
+        c.disc(px, py, 6.0, rgba(col, 255));
+        let tcol = mix(green, rgb(255, 255, 255), if since < 20.0 { 0.6 } else { 0.0 });
+        let tcol = mix(rgb(0, 0, 0), tcol, glow.max(0.65));
+        c.text(&format!("{} {}{}", label, metric_value_str(m, key), metric_unit(key)), px + 10.0, py - 6.0, 16.0, tcol, true, Anchor::Left);
+    }
+    c.header("DIGOO");
+}
+
+/// Mancha radial suave (aproxima o blur do Python): discos concêntricos de alfa baixo.
+fn soft_blob(c: &mut Canvas, cx: f32, cy: f32, r: f32, col: Color) {
+    let steps = 26;
+    for i in 0..steps {
+        let rr = r * (steps - i) as f32 / steps as f32;
+        c.disc(cx, cy, rr, rgba(col, 9));
+    }
+}
+
+/// Vidro fosco: fundo suave colorido + cartões translúcidos (lindo por cima de vídeo; aqui sobre o fundo).
+fn theme_vidro(c: &mut Canvas, m: &Metrics) {
+    let pal = c.pal;
+    c.fill(rgb(10, 10, 18));
+    soft_blob(c, 90.0, 110.0, 230.0, pal.acc);
+    soft_blob(c, 400.0, 360.0, 230.0, pal.acc2);
+    soft_blob(c, 300.0, 30.0, 180.0, mix(pal.acc, pal.acc2, 0.5));
+    c.pal.muted = rgb(225, 225, 235); // unidades legíveis sobre o vidro claro
+    let white = rgb(255, 255, 255);
+    let boxes = [
+        (16.0f32, 60.0f32, 232.0f32, 290.0f32),
+        (248.0, 60.0, 464.0, 290.0),
+        (16.0, 306.0, 464.0, 464.0),
+    ];
+    for &(x0, y0, x1, y1) in &boxes {
+        c.round_rect(x0, y0, x1 - x0, y1 - y0, 22.0, Some(Color::from_rgba8(255, 255, 255, 34)), Some((Color::from_rgba8(255, 255, 255, 90), 2.0)));
+    }
+    c.header("DIGOO");
+    let tops = [(boxes[0], "CPU", "cpu_temp", "cpu_load"), (boxes[1], "GPU", "gpu_temp", "gpu_load")];
+    for ((x0, y0, x1, _y1), label, tk, lk) in tops {
+        c.text(label, x0 + 20.0, y0 + 36.0, 26.0, white, true, Anchor::Left);
+        c.value_unit((x0 + x1) / 2.0, y0 + 150.0, &metric_value_str(m, tk), metric_unit(tk), 84.0, white, Anchor::Center);
+        c.text(&format!("USO {}", pct(metric_val(m, lk))), (x0 + x1) / 2.0, y0 + 182.0, 22.0, rgb(235, 235, 245), false, Anchor::Center);
+        let frac = frac0(metric_frac(m, lk));
+        c.bar(x0 + 24.0, y0 + 200.0, x1 - x0 - 48.0, 8.0, frac, white);
+    }
+    let (x0, y0, x1, _y1) = boxes[2];
+    let cols = [("RAM", "ram_load"), ("VRAM", "gpu_vram"), ("REDE", "net_down")];
+    for (i, (label, key)) in cols.iter().enumerate() {
+        let cxx = x0 + (x1 - x0) * (i as f32 + 0.5) / 3.0;
+        c.text(label, cxx, y0 + 46.0, 20.0, rgb(235, 235, 245), true, Anchor::Center);
+        c.value_unit(cxx, y0 + 108.0, &metric_value_str(m, key), metric_unit(key), 40.0, white, Anchor::Center);
+        let frac = metric_frac(m, key);
+        if !frac.is_nan() {
+            c.bar(cxx - 52.0, y0 + 124.0, 104.0, 6.0, frac.clamp(0.0, 1.0), white);
+        }
+    }
+}
+
+/// Janela de RPG 8-bit: os sensores viram barras de vida, desenhado em pixels grandes.
+fn theme_rpg(c: &mut Canvas, m: &Metrics) {
+    const S: i32 = 160;
+    let mut small = Pixmap::new(S as u32, S as u32).unwrap();
+    let blue = rgb(24, 32, 120);
+    let white = rgb(248, 248, 248);
+    let frame = rgb(150, 150, 200);
+    px_rect(&mut small, 3, 3, S - 6, S - 6, blue);
+    px_rect(&mut small, 3, 3, S - 6, 2, white); // molduras brancas (2 px)
+    px_rect(&mut small, 3, S - 5, S - 6, 2, white);
+    px_rect(&mut small, 3, 3, 2, S - 6, white);
+    px_rect(&mut small, S - 5, 3, 2, S - 6, white);
+    px_rect(&mut small, 6, 6, S - 12, 1, frame); // moldura interna
+    px_rect(&mut small, 6, S - 7, S - 12, 1, frame);
+    px_rect(&mut small, 6, 6, 1, S - 12, frame);
+    px_rect(&mut small, S - 7, 6, 1, S - 12, frame);
+    let clk = now();
+    blit_text(&mut small, &c.f.bold, "STATUS", 12.0, 22.0, 13.0, rgb(255, 220, 80), Anchor::Left);
+    blit_text(&mut small, &c.f.reg, &format!("{:02}:{:02}", clk.h, clk.m), (S - 12) as f32, 22.0, 11.0, white, Anchor::Right);
+    let rows = [
+        ("CPU", "cpu_temp", "cpu_load"),
+        ("GPU", "gpu_temp", "gpu_load"),
+        ("RAM", "", "ram_load"),
+        ("VRAM", "", "gpu_vram"),
+    ];
+    let mut y = 34i32;
+    for (label, tk, lk) in rows {
+        let frac = frac0(metric_frac(m, lk));
+        let hp = 1.0 - frac;
+        let col = if hp > 0.5 { rgb(80, 220, 80) } else if hp > 0.2 { rgb(240, 200, 40) } else { rgb(230, 50, 40) };
+        blit_text(&mut small, &c.f.reg, &label[..label.len().min(4)], 12.0, (y + 11) as f32, 11.0, white, Anchor::Left);
+        let tpart = if tk.is_empty() { String::new() } else { format!("{}° ", metric_value_str(m, tk)) };
+        let right = format!("{}{:.0}/100", tpart, frac * 100.0);
+        blit_text(&mut small, &c.f.reg, &right, (S - 12) as f32, (y + 11) as f32, 11.0, white, Anchor::Right);
+        px_rect(&mut small, 12, y + 14, S - 24, 6, rgb(10, 10, 40)); // fundo da barra
+        px_rect(&mut small, 12, y + 14, S - 24, 1, white); // borda branca
+        px_rect(&mut small, 12, y + 19, S - 24, 1, white);
+        px_rect(&mut small, 12, y + 14, 1, 6, white);
+        px_rect(&mut small, S - 13, y + 14, 1, 6, white);
+        if hp > 0.0 {
+            let w = ((S - 27) as f32 * hp) as i32;
+            px_rect(&mut small, 13, y + 15, w, 4, col);
+        }
+        y += 29;
+    }
+    blit_scaled(&mut c.pm, &small, 3);
+}
+
 /// Temas disponíveis (nome -> função). Vai crescendo conforme o port.
 pub const THEMES: &[&str] = &[
     "aneis", "neon", "grade", "velocimetro", "graficos", "minimal", "relogio", "compacto", "terminal", "hud", "barras",
-    "led",
+    "led", "anel_unico", "lista", "cartoes", "termometro", "cronografo", "radar", "vidro", "rpg",
 ];
 
 pub fn render_theme(fonts: &Fonts, pal: Palette, name: &str, m: &Metrics, hist: &History) -> Pixmap {
@@ -844,6 +1336,14 @@ pub fn render_theme(fonts: &Fonts, pal: Palette, name: &str, m: &Metrics, hist: 
         "hud" => theme_hud(&mut c, m),
         "barras" => theme_barras(&mut c, m),
         "led" => theme_led(&mut c, m),
+        "anel_unico" => theme_anel_unico(&mut c, m),
+        "lista" => theme_lista(&mut c, m),
+        "cartoes" => theme_cartoes(&mut c, m, hist),
+        "termometro" => theme_termometro(&mut c, m),
+        "cronografo" => theme_cronografo(&mut c, m),
+        "radar" => theme_radar(&mut c, m),
+        "vidro" => theme_vidro(&mut c, m),
+        "rpg" => theme_rpg(&mut c, m),
         _ => theme_aneis(&mut c, m),
     }
     c.pm
@@ -867,6 +1367,7 @@ mod tests {
             hist.gpu_load.push(60.0 + 30.0 * (t * 0.10 + 1.0).sin());
             hist.cpu_temp.push(58.0 + 8.0 * (t * 0.12).sin());
             hist.gpu_temp.push(52.0 + 6.0 * (t * 0.09 + 2.0).sin());
+            hist.ram_load.push(46.0 + 12.0 * (t * 0.07 + 0.5).sin());
         }
         // grade cols x rows com todos os temas
         let cols = 3u32;
