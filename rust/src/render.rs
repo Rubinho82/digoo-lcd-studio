@@ -92,6 +92,7 @@ const WEEKDAYS_FULL: [&str; 7] = ["SEGUNDA", "TERÇA", "QUARTA", "QUINTA", "SEXT
 pub struct Fonts {
     reg: Font,
     bold: Font,
+    mono: Font,
 }
 impl Fonts {
     pub fn load() -> Fonts {
@@ -102,7 +103,9 @@ impl Fonts {
         };
         let reg = f(r"C:\Windows\Fonts\segoeui.ttf").expect("segoeui.ttf");
         let bold = f(r"C:\Windows\Fonts\segoeuib.ttf").unwrap_or_else(|| reg.clone());
-        Fonts { reg, bold }
+        // mono p/ o tema Terminal (alinhamento de colunas); cai pra reg se faltar.
+        let mono = f(r"C:\Windows\Fonts\consola.ttf").unwrap_or_else(|| reg.clone());
+        Fonts { reg, bold, mono }
     }
 }
 
@@ -256,6 +259,31 @@ impl<'a> Canvas<'a> {
         self.fill_path(pb, col);
     }
 
+    /// Polígono fechado com preenchimento e/ou contorno (painéis inclinados do HUD).
+    pub fn polygon(&mut self, pts: &[(f32, f32)], fill: Option<Color>, outline: Option<(Color, f32)>) {
+        if pts.len() < 3 {
+            return;
+        }
+        if let Some(col) = fill {
+            let mut pb = PathBuilder::new();
+            pb.move_to(pts[0].0, pts[0].1);
+            for p in &pts[1..] {
+                pb.line_to(p.0, p.1);
+            }
+            pb.close();
+            self.fill_path(pb, col);
+        }
+        if let Some((col, width)) = outline {
+            let mut pb = PathBuilder::new();
+            pb.move_to(pts[0].0, pts[0].1);
+            for p in &pts[1..] {
+                pb.line_to(p.0, p.1);
+            }
+            pb.close();
+            self.stroke(pb, col, width, false);
+        }
+    }
+
     /// Largura em px de um texto (para caixas que abraçam o texto, como o relógio do tema compacto).
     pub fn text_width(&self, s: &str, size: f32, bold: bool) -> f32 {
         let font = if bold { &self.f.bold } else { &self.f.reg };
@@ -302,39 +330,12 @@ impl<'a> Canvas<'a> {
 
     pub fn text(&mut self, s: &str, x: f32, y: f32, size: f32, col: Color, bold: bool, anchor: Anchor) {
         let font = if bold { &self.f.bold } else { &self.f.reg };
-        let total: f32 = s.chars().map(|c| font.metrics(c, size).advance_width).sum();
-        let mut pen = match anchor {
-            Anchor::Left => x,
-            Anchor::Center => x - total / 2.0,
-            Anchor::Right => x - total,
-        };
-        let (pw, ph) = (W as i32, H as i32);
-        let (cr, cg, cb) = (col.red(), col.green(), col.blue());
-        let data = self.pm.data_mut();
-        for ch in s.chars() {
-            let (mt, bmp) = font.rasterize(ch, size);
-            let gx = pen.round() as i32 + mt.xmin;
-            let gy = y.round() as i32 - (mt.height as i32 + mt.ymin);
-            for ry in 0..mt.height as i32 {
-                for rx in 0..mt.width as i32 {
-                    let a = bmp[(ry * mt.width as i32 + rx) as usize] as f32 / 255.0;
-                    if a <= 0.0 {
-                        continue;
-                    }
-                    let (px, py) = (gx + rx, gy + ry);
-                    if px < 0 || py < 0 || px >= pw || py >= ph {
-                        continue;
-                    }
-                    let idx = ((py * pw + px) * 4) as usize;
-                    for (k, cc) in [cr, cg, cb].iter().enumerate() {
-                        let bgv = data[idx + k] as f32;
-                        data[idx + k] = (bgv + (cc * 255.0 - bgv) * a) as u8;
-                    }
-                    data[idx + 3] = 255;
-                }
-            }
-            pen += mt.advance_width;
-        }
+        blit_text(&mut self.pm, font, s, x, y, size, col, anchor);
+    }
+
+    /// Texto em fonte monoespaçada (tema Terminal: colunas alinhadas).
+    pub fn text_mono(&mut self, s: &str, x: f32, y: f32, size: f32, col: Color, anchor: Anchor) {
+        blit_text(&mut self.pm, &self.f.mono, s, x, y, size, col, anchor);
     }
 
     /// Número grande + unidade pequena, alinhados pela base.
@@ -370,6 +371,44 @@ impl<'a> Canvas<'a> {
 
     pub fn into_jpeg(self, rotation: u32, quality: u8) -> Vec<u8> {
         to_jpeg(&self.pm, rotation, quality)
+    }
+}
+
+/// Rasteriza texto sobre o pixmap na fonte dada (y = linha de base; âncora horizontal).
+/// Função livre p/ permitir escolher a fonte (reg/bold/mono) sem conflito de empréstimo.
+fn blit_text(pm: &mut Pixmap, font: &Font, s: &str, x: f32, y: f32, size: f32, col: Color, anchor: Anchor) {
+    let total: f32 = s.chars().map(|c| font.metrics(c, size).advance_width).sum();
+    let mut pen = match anchor {
+        Anchor::Left => x,
+        Anchor::Center => x - total / 2.0,
+        Anchor::Right => x - total,
+    };
+    let (pw, ph) = (pm.width() as i32, pm.height() as i32);
+    let (cr, cg, cb) = (col.red(), col.green(), col.blue());
+    let data = pm.data_mut();
+    for ch in s.chars() {
+        let (mt, bmp) = font.rasterize(ch, size);
+        let gx = pen.round() as i32 + mt.xmin;
+        let gy = y.round() as i32 - (mt.height as i32 + mt.ymin);
+        for ry in 0..mt.height as i32 {
+            for rx in 0..mt.width as i32 {
+                let a = bmp[(ry * mt.width as i32 + rx) as usize] as f32 / 255.0;
+                if a <= 0.0 {
+                    continue;
+                }
+                let (px, py) = (gx + rx, gy + ry);
+                if px < 0 || py < 0 || px >= pw || py >= ph {
+                    continue;
+                }
+                let idx = ((py * pw + px) * 4) as usize;
+                for (k, cc) in [cr, cg, cb].iter().enumerate() {
+                    let bgv = data[idx + k] as f32;
+                    data[idx + k] = (bgv + (cc * 255.0 - bgv) * a) as u8;
+                }
+                data[idx + 3] = 255;
+            }
+        }
+        pen += mt.advance_width;
     }
 }
 
@@ -639,8 +678,157 @@ fn theme_compacto(c: &mut Canvas, m: &Metrics) {
     c.line(W / 2.0, H - 118.0, W / 2.0, H - 28.0, rgba(pal.muted, 80), 2.0);
 }
 
+// --- tema HUD: painel sextavado (preenchimento translúcido + contorno) ---
+fn hud_panel(c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32, col: Color) {
+    let pts = [
+        (x0 + 18.0, y0),
+        (x1, y0),
+        (x1, y1 - 18.0),
+        (x1 - 18.0, y1),
+        (x0, y1),
+        (x0, y0 + 18.0),
+    ];
+    c.polygon(&pts, Some(rgba(col, 22)), Some((rgba(col, 230), 2.0)));
+}
+
+/// Terminal retrô: texto verde de monitor CRT, com linhas de varredura.
+fn theme_terminal(c: &mut Canvas, m: &Metrics) {
+    c.fill(rgb(2, 10, 4));
+    let clk = now();
+    let green = rgb(64, 255, 120);
+    let dim = rgb(30, 120, 60);
+    let blink = (clk.ms / 500) % 2 == 1; // cursor piscando ~2x/s
+    let lines = [
+        format!("> DIGOO  {:02}:{:02}", clk.h, clk.m),
+        String::new(),
+        format!("CPU   {:>4}°  {:>5}", temp_str(m.cpu_temp), pct(m.cpu_load)),
+        format!("GPU   {:>4}°  {:>5}", temp_str(m.gpu_temp), pct(m.gpu_load)),
+        format!("RAM   {:>11}", pct(m.ram_load)),
+        format!("VRAM  {:>8} GB", "--"), // sensores extras chegam no lote 2
+        format!("CLK   {:>8} GHz", "--"),
+        format!("PWR   {:>9} W", "--"),
+        String::new(),
+        if blink { "> _".to_string() } else { ">".to_string() },
+    ];
+    for (i, ln) in lines.iter().enumerate() {
+        c.text_mono(ln, 26.0, 52.0 + i as f32 * 40.0, 26.0, green, Anchor::Left);
+    }
+    // barras em blocos ASCII, alinhadas às linhas CPU/GPU/RAM
+    for (i, &v) in [m.cpu_load, m.gpu_load, m.ram_load].iter().enumerate() {
+        let frac = if v.is_nan() { 0.0 } else { (v / 100.0).clamp(0.0, 1.0) };
+        let n = (frac * 14.0) as usize;
+        let ascii: String = "#".repeat(n) + &".".repeat(14 - n);
+        let y_top = if i < 2 { 110.0 + i as f32 * 40.0 } else { 190.0 };
+        c.text_mono(&ascii, 300.0, y_top + 22.0, 20.0, dim, Anchor::Left);
+    }
+    // varredura CRT
+    let mut y = 0.0;
+    while y < H {
+        c.line(0.0, y, W, y, Color::from_rgba8(0, 0, 0, 70), 1.0);
+        y += 3.0;
+    }
+}
+
+/// HUD cyberpunk: painéis inclinados, amarelo e ciano.
+fn theme_hud(c: &mut Canvas, m: &Metrics) {
+    let pal = c.pal;
+    let yel = rgb(255, 214, 0);
+    let cya = pal.acc;
+    c.fill(rgb(8, 8, 14));
+    let mut y = 0.0;
+    while y < H {
+        c.line(0.0, y, W, y, Color::from_rgba8(255, 255, 255, 10), 1.0);
+        y += 24.0;
+    }
+    let clk = now();
+    c.polygon(&[(0.0, 0.0), (W, 0.0), (W, 50.0), (W - 30.0, 64.0), (0.0, 64.0)], Some(yel), None);
+    c.text("NET//RUN", 20.0, 42.0, 28.0, rgb(10, 10, 14), true, Anchor::Left);
+    c.text(&format!("{:02}:{:02}", clk.h, clk.m), W - 44.0, 42.0, 26.0, rgb(10, 10, 14), true, Anchor::Right);
+    let items = [("CPU", m.cpu_temp, m.cpu_load, cya), ("GPU", m.gpu_temp, m.gpu_load, yel)];
+    for (i, &(label, temp, load, col)) in items.iter().enumerate() {
+        let x0 = 16.0 + i as f32 * 232.0;
+        hud_panel(c, x0, 86.0, x0 + 216.0, 290.0, col);
+        c.text(label, x0 + 18.0, 118.0, 24.0, col, true, Anchor::Left);
+        c.value_unit(x0 + 18.0, 210.0, &temp_str(temp), "°C", 78.0, rgb(255, 255, 255), Anchor::Left);
+        let frac = if load.is_nan() { 0.0 } else { (load / 100.0).clamp(0.0, 1.0) };
+        for s in 0..10 {
+            let on = (s as f32) < (frac * 10.0).round();
+            let seg = if on { col } else { rgb(60, 60, 70) };
+            c.rrect(x0 + 18.0 + s as f32 * 18.0, 240.0, 12.0, 22.0, seg);
+        }
+        c.text(&pct(load), x0 + 198.0, 118.0, 22.0, rgb(220, 220, 230), true, Anchor::Right);
+    }
+    hud_panel(c, 16.0, 306.0, W - 16.0, 464.0, cya);
+    let rows = [
+        ("RAM", format!("{} %", num(m.ram_load)), !m.ram_load.is_nan()),
+        ("VRAM", "-- GB".to_string(), false),
+        ("REDE", "-- MB/s".to_string(), false),
+    ];
+    for (i, (label, val, has_bar)) in rows.iter().enumerate() {
+        let y = 340.0 + i as f32 * 42.0;
+        c.text(label, 36.0, y, 22.0, cya, true, Anchor::Left);
+        c.text(val, W - 36.0, y, 22.0, rgb(255, 255, 255), true, Anchor::Right);
+        if *has_bar {
+            let frac = (m.ram_load / 100.0).clamp(0.0, 1.0);
+            c.bar(130.0, y - 4.0, 200.0, 8.0, frac, yel);
+        }
+    }
+}
+
+/// Barras verticais grandes: CPU, GPU, RAM e VRAM lado a lado.
+fn theme_barras(c: &mut Canvas, m: &Metrics) {
+    c.gradient_bg();
+    c.header("DIGOO");
+    let pal = c.pal;
+    let items: [(&str, f32, f32, bool, Color); 4] = [
+        ("CPU", m.cpu_load, m.cpu_temp, true, pal.acc),
+        ("GPU", m.gpu_load, m.gpu_temp, true, pal.acc2),
+        ("RAM", m.ram_load, f32::NAN, false, rgb(120, 230, 140)),
+        ("VRAM", f32::NAN, f32::NAN, false, rgb(255, 190, 60)),
+    ];
+    let (bw, gap, top, bottom) = (84.0f32, 28.0f32, 120.0f32, 400.0f32);
+    let x0 = (W - (4.0 * bw + 3.0 * gap)) / 2.0;
+    for (i, &(label, load, temp, has_temp, col)) in items.iter().enumerate() {
+        let x = x0 + i as f32 * (bw + gap);
+        let frac = if load.is_nan() { 0.0 } else { (load / 100.0).clamp(0.0, 1.0) };
+        c.round_rect(x, top, bw, bottom - top, 14.0, Some(rgba(pal.muted, 35)), None);
+        let h = (bottom - top) * frac.max(0.02);
+        let steps = 18;
+        for s in 0..steps {
+            let y1 = bottom - h * s as f32 / steps as f32;
+            let y0 = bottom - h * (s + 1) as f32 / steps as f32;
+            let k = s as f32 / steps as f32;
+            let cc = mix(col, rgb(255, 255, 255), k * 0.35); // degradê de baixo pra cima
+            c.rrect(x, y0, bw, (y1 - y0) + 1.0, rgba(cc, 235));
+        }
+        c.text(&format!("{:.0}%", frac * 100.0), x + bw / 2.0, top - 22.0, 26.0, pal.txt, true, Anchor::Center);
+        c.text(label, x + bw / 2.0, bottom + 26.0, 22.0, col, true, Anchor::Center);
+        if has_temp {
+            c.text(&format!("{}°", temp_str(temp)), x + bw / 2.0, bottom + 56.0, 26.0, temp_color(temp, &pal), true, Anchor::Center);
+        }
+    }
+}
+
+/// Dígitos de LED: números enormes com brilho, estilo painel digital.
+fn theme_led(c: &mut Canvas, m: &Metrics) {
+    c.fill(rgb(6, 4, 4));
+    let items = [("CPU", m.cpu_temp, m.cpu_load, rgb(255, 60, 40)), ("GPU", m.gpu_temp, m.gpu_load, rgb(60, 220, 255))];
+    for (i, &(label, temp, load, col)) in items.iter().enumerate() {
+        let y = 150.0 + i as f32 * 200.0;
+        c.glow_text(&temp_str(temp), W - 110.0, y, 130.0, col, Anchor::Right);
+        c.text("°C", W - 96.0, y - 44.0, 30.0, col, true, Anchor::Left);
+        c.text(label, 30.0, y - 60.0, 28.0, col, true, Anchor::Left);
+        c.text(&pct(load), 30.0, y - 26.0, 26.0, rgb(200, 200, 200), true, Anchor::Left);
+    }
+    let clk = now();
+    c.text(&format!("{:02}:{:02}", clk.h, clk.m), W / 2.0, 452.0, 30.0, rgb(255, 170, 60), true, Anchor::Center);
+}
+
 /// Temas disponíveis (nome -> função). Vai crescendo conforme o port.
-pub const THEMES: &[&str] = &["aneis", "neon", "grade", "velocimetro", "graficos", "minimal", "relogio", "compacto"];
+pub const THEMES: &[&str] = &[
+    "aneis", "neon", "grade", "velocimetro", "graficos", "minimal", "relogio", "compacto", "terminal", "hud", "barras",
+    "led",
+];
 
 pub fn render_theme(fonts: &Fonts, pal: Palette, name: &str, m: &Metrics, hist: &History) -> Pixmap {
     let mut c = Canvas::new(fonts, pal);
@@ -652,6 +840,10 @@ pub fn render_theme(fonts: &Fonts, pal: Palette, name: &str, m: &Metrics, hist: 
         "minimal" => theme_minimal(&mut c, m),
         "relogio" => theme_relogio(&mut c, m),
         "compacto" => theme_compacto(&mut c, m),
+        "terminal" => theme_terminal(&mut c, m),
+        "hud" => theme_hud(&mut c, m),
+        "barras" => theme_barras(&mut c, m),
+        "led" => theme_led(&mut c, m),
         _ => theme_aneis(&mut c, m),
     }
     c.pm
