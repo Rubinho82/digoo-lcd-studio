@@ -13,8 +13,10 @@ Já funciona de ponta a ponta:
 - desenha os **20 temas** (tiny-skia + fontdue, escolhidos por argumento) e envia em **JPEG 4:2:0** (exigência da
   tela), com keepalive e recuperação;
 - **tema Música** (`digoo-lcd musica-<modelo>`): espectro do som do PC (48 bandas via `--audio` do helper) +
-  "tocando agora", em **12 modelos** (capa, vinil, cartão, minimal, espectro, neon, cassete, aparelho, pixel,
-  ondas, rádio, polaroide) — anima a ~25 q/s.
+  "tocando agora", em **13 modelos** (capa, vinil, cartão, minimal, espectro, neon, cassete, aparelho, pixel,
+  ondas, rádio, polaroide, letra) — anima a ~25 q/s;
+- **letras sincronizadas** (karaokê): busca na **LRCLIB** (`ureq`, sem chave) numa thread e pinta a linha atual
+  conforme é cantada.
 
 ### Medições (nesta máquina)
 | | app Python (bandeja) | núcleo Rust |
@@ -26,9 +28,9 @@ Já funciona de ponta a ponta:
 O `sensorhelper.exe` (C#) é o mesmo nos dois (~37 MB), custo compartilhado.
 
 ## Falta (roadmap)
-1. Já portados: os **20 temas**, os **sensores** e **12 dos 14 modelos de música**. Faltam: os **2 modelos de
-   letra** (letra/letra_capa, que dependem das **letras** via LRCLIB), a **tradução** (MyMemory/DeepL) e as
-   **capas de álbum** (decodificar JPEG). Letras e tradução precisam de um cliente HTTP.
+1. Já portados: os **20 temas**, os **sensores**, **13 dos 14 modelos de música** e as **letras sincronizadas**
+   (LRCLIB). Faltam: o modelo **letra_capa**, a **tradução** das letras (MyMemory/DeepL) e as **capas de álbum**
+   (decodificar JPEG).
 2. Letras/tradução, biblioteca online, vídeo/GIF, espelho.
 3. Interface de configuração (provável: egui, leve) — ou manter a interface Python falando com este núcleo.
 4. Resolução/giro adaptáveis a outras telas.

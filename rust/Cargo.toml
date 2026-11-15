@@ -16,6 +16,7 @@ fontdue = "0.9"
 jpeg-encoder = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = "2" # cliente HTTP (letras LRCLIB); rustls+webpki embutidos, sem dependência de cert do SO
 
 [profile.release]
 opt-level = 3

@@ -1,6 +1,7 @@
 //! Digoo LCD — núcleo nativo (Rust). Fase 1: acha a tela, lê os sensores pelo helper C#,
 //! desenha um painel e envia os quadros, mantendo a tela viva. Foco em pouca memória e velocidade.
 
+mod lyrics;
 mod panel;
 mod protocol;
 mod render;
@@ -99,6 +100,7 @@ fn main() {
     let mut hist = render::History::default();
     let mut net = sensors::NetCounter::new();
     let mut viz = render::AudioViz::new();
+    let lyrics_cache = lyrics::LyricsCache::new();
     let period = Duration::from_millis(if is_music { 40 } else { 500 }); // música anima ~25 q/s
     let mut frames = 0u64;
     let mut last = Instant::now();
@@ -123,7 +125,8 @@ fn main() {
             let audio = sensors.as_ref().and_then(|s| s.audio_snapshot());
             viz.update(audio.as_ref(), dt);
             let media = sensors.as_ref().and_then(|s| s.media_snapshot());
-            render::render_music(&fonts, pal, &music_layout, &viz, media.as_ref(), "circulo", started.elapsed().as_secs_f32())
+            let lyric = media.as_ref().filter(|m| !m.title.is_empty()).map(|m| lyrics_cache.get(m));
+            render::render_music(&fonts, pal, &music_layout, &viz, media.as_ref(), "circulo", started.elapsed().as_secs_f32(), lyric.as_ref())
         } else {
             render::render_theme(&fonts, pal, &theme, &m, &hist)
         };

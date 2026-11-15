@@ -1,6 +1,7 @@
 //! Desenho do painel em CPU (tiny-skia) + texto (fontdue) + JPEG 4:2:0 (exigência da tela).
 //! Framework de Canvas + temas portados do app Python. 480x480.
 
+use crate::lyrics::{Lyric, LyricState};
 use crate::sensors::{AudioSnapshot, MediaSnapshot, Metrics};
 use fontdue::Font;
 use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
@@ -1572,6 +1573,7 @@ pub struct MusicCtx<'a> {
     pub media: Option<&'a MediaSnapshot>,
     pub wave: &'a str,
     pub anim: f32, // segundos contínuos (p/ carretéis, ondas, giros)
+    pub lyric: Option<&'a Lyric>,
 }
 impl<'a> MusicCtx<'a> {
     fn has(&self) -> bool {
@@ -1944,17 +1946,92 @@ fn layout_polaroid(c: &mut Canvas, x: &MusicCtx) {
     draw_spectrum(c, x.viz, if x.wave == "circulo" { "onda" } else { x.wave }, (444.0, 476.0, 8.0, W - 8.0), None);
 }
 
+/// Cabeçalho de música: título + artista no topo à esquerda (sem capa).
+fn music_header(c: &mut Canvas, x: &MusicCtx) {
+    let pal = c.pal;
+    x.t(c, 20.0, 38.0, &x.title(), 24.0, pal.txt, true, Anchor::Left, W - 40.0);
+    x.t(c, 20.0, 64.0, &x.artist(), 17.0, pal.muted, false, Anchor::Left, W - 40.0);
+}
+
+/// Texto com "varrição" de karaokê: pinta os caracteres já cantados (até `frac`) com `hi`.
+fn sweep_text(c: &mut Canvas, cx: f32, y: f32, text: &str, size: f32, frac: f32, base: Color, hi: Color) {
+    let total = c.text_width(text, size, true);
+    let x0 = cx - total / 2.0;
+    let sweep_x = x0 + total * frac.clamp(0.0, 1.0);
+    let mut pen = x0;
+    for ch in text.chars() {
+        let w = c.f.bold.metrics(ch, size).advance_width;
+        let col = if pen + w * 0.5 <= sweep_x { hi } else { base };
+        c.text(&ch.to_string(), pen, y, size, col, true, Anchor::Left);
+        pen += w;
+    }
+}
+
+/// Mensagem quando não dá p/ mostrar a letra (buscando, sem, erro, instrumental…).
+fn lyric_message(lyr: Option<&Lyric>, has: bool) -> &'static str {
+    if !has {
+        return "Toque uma música no Spotify ou YouTube";
+    }
+    match lyr.map(|l| l.state) {
+        Some(LyricState::Searching) => "Procurando a letra…",
+        Some(LyricState::Error) => "Sem conexão para a letra — tento de novo",
+        Some(LyricState::Instrumental) => "♪  Instrumental  ♪",
+        Some(LyricState::Off) => "Letras desligadas",
+        _ => "Letra não encontrada",
+    }
+}
+
+/// Karaokê: a linha atual grande pintando conforme é cantada; as vizinhas embaixo/em cima, mais apagadas.
+fn layout_letra(c: &mut Canvas, x: &MusicCtx) {
+    let pal = c.pal;
+    let bg = rgb(8, 8, 12);
+    music_header(c, x);
+    let (cy, step) = (252.0f32, 56.0f32);
+    let ok = x.lyric.map_or(false, |l| l.state == LyricState::Ok && !l.lines.is_empty());
+    if ok {
+        let l = x.lyric.unwrap();
+        let dur = x.media.map_or(0.0, |m| m.duration) as f32;
+        let pos = x.media.map_or(0.0, |m| m.position) as f32;
+        let (i, frac, _since) = l.at(pos, dur);
+        let cur = i.max(0) as usize;
+        let line = &l.lines[cur].1;
+        let fr = if l.synced { frac } else { 0.0 };
+        sweep_text(c, 240.0, cy, if line.is_empty() { "♪" } else { line }, 32.0, fr, pal.txt, pal.acc);
+        for d in 1..=3i32 {
+            let dim = mix(pal.txt, bg, 0.25 + 0.22 * d as f32); // mais longe = mais apagada
+            let up = cur as i32 - d;
+            if up >= 0 {
+                let s = ellipsize(c, &l.lines[up as usize].1, 24.0, false, W - 40.0);
+                c.text(&s, 240.0, cy - d as f32 * step, 24.0, dim, false, Anchor::Center);
+            }
+            let dn = cur + d as usize;
+            if dn < l.lines.len() {
+                let s = ellipsize(c, &l.lines[dn].1, 24.0, false, W - 40.0);
+                c.text(&s, 240.0, cy + d as f32 * step, 24.0, dim, false, Anchor::Center);
+            }
+        }
+    } else {
+        let msg = lyric_message(x.lyric, x.has());
+        x.t(c, 240.0, cy, msg, 26.0, pal.muted, false, Anchor::Center, W - 40.0);
+    }
+    x.progress(c, 40.0, W - 40.0, 440.0, false);
+    if x.wave != "off" {
+        draw_bars(c, x.viz, 450.0, 476.0, if x.wave == "circulo" { "barras" } else { x.wave }, 200.0, W - 40.0, false);
+    }
+}
+
 /// Temas de música (modelos de music.py + music_extra.py). Sem capa de álbum ainda → nota ♫.
 pub const MUSIC_LAYOUTS: &[&str] = &[
-    "capa", "vinil", "cartao", "minimal", "espectro", "neon", "cassete", "aparelho", "pixel", "ondas", "radio", "polaroid",
+    "capa", "vinil", "cartao", "minimal", "espectro", "neon", "cassete", "aparelho", "pixel", "ondas", "radio", "polaroid", "letra",
 ];
 
 /// Renderiza o tema Música no modelo `layout` com o estilo de onda `wave`.
-pub fn render_music(fonts: &Fonts, pal: Palette, layout: &str, viz: &AudioViz, media: Option<&MediaSnapshot>, wave: &str, anim: f32) -> Pixmap {
+pub fn render_music(fonts: &Fonts, pal: Palette, layout: &str, viz: &AudioViz, media: Option<&MediaSnapshot>, wave: &str, anim: f32, lyric: Option<&Lyric>) -> Pixmap {
     let mut c = Canvas::new(fonts, pal);
     c.fill(rgb(8, 8, 12));
-    let ctx = MusicCtx { viz, media, wave, anim };
+    let ctx = MusicCtx { viz, media, wave, anim, lyric };
     match layout {
+        "letra" => layout_letra(&mut c, &ctx),
         "capa" => layout_capa(&mut c, &ctx),
         "vinil" => layout_vinil(&mut c, &ctx),
         "cartao" => layout_cartao(&mut c, &ctx),
@@ -1974,6 +2051,7 @@ pub fn render_music(fonts: &Fonts, pal: Palette, layout: &str, viz: &AudioViz, m
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lyrics::{Lyric, LyricState};
     use crate::sensors::{MediaSnapshot, Metrics};
 
     #[test]
@@ -1994,6 +2072,16 @@ mod tests {
             title: "Blinding Lights".into(), artist: "The Weeknd".into(), album: String::new(),
             status: "Playing".into(), app: "Spotify.exe".into(), position: 83.0, duration: 200.0,
         };
+        let lyric = Lyric {
+            state: LyricState::Ok,
+            synced: true,
+            lines: vec![
+                (76.0, "I'm blinded by the lights".into()),
+                (80.0, "No, I can't sleep until I feel your touch".into()),
+                (84.0, "I said, ooh, I'm drowning in the night".into()),
+                (88.0, "Oh, when I'm like this, you're the one I trust".into()),
+            ],
+        };
         let waves = ["circulo", "circulo", "barras", "onda", "barras", "onda", "barras", "barras", "barras", "onda", "barras", "onda"];
         let cols = 3u32;
         let rows = (MUSIC_LAYOUTS.len() as u32 + cols - 1) / cols;
@@ -2001,7 +2089,7 @@ mod tests {
         let mut sheet = Pixmap::new(sheet_w, sheet_h).unwrap();
         sheet.fill(rgb(40, 40, 40));
         for (i, layout) in MUSIC_LAYOUTS.iter().enumerate() {
-            let pm = render_music(&fonts, pal, layout, &viz, Some(&media), waves[i % waves.len()], 1.3);
+            let pm = render_music(&fonts, pal, layout, &viz, Some(&media), waves[i % waves.len()], 1.3, Some(&lyric));
             let (ox, oy) = ((i as u32 % cols) * 480, (i as u32 / cols) * 480);
             let (pw, sdata, ddata) = (pm.width(), pm.data(), sheet.data_mut());
             for y in 0..480u32 {
