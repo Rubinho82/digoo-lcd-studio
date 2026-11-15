@@ -1,6 +1,7 @@
 //! Digoo LCD — núcleo nativo (Rust). Fase 1: acha a tela, lê os sensores pelo helper C#,
 //! desenha um painel e envia os quadros, mantendo a tela viva. Foco em pouca memória e velocidade.
 
+mod config;
 mod cover;
 mod lyrics;
 mod media;
@@ -91,6 +92,11 @@ fn main() {
         Some("espelho") | Some("mirror") => {
             let fit = args.get(2).map(|s| s.as_str()).unwrap_or("cover");
             run_mirror(&mut pan, fit, rotation, max_kb, info.max_fps());
+            return;
+        }
+        // sem argumento (ou `config`/`auto`): dirigido pelo config.json que a GUI escreve, ao vivo
+        None | Some("config") | Some("auto") => {
+            run_config(&mut pan, &info);
             return;
         }
         _ => {}
@@ -255,6 +261,143 @@ fn run_mirror(pan: &mut panel::Panel, fit: &str, rotation: u32, max_kb: u32, max
     let (mut frames, started) = (0u64, Instant::now());
     loop {
         match media::mirror_pixmap(fit) {
+            Some(pm) => {
+                let jpeg = encode_fit(&pm, rotation, max_kb);
+                pump(pan, &jpeg, &mut frames, started);
+            }
+            None => pan.keepalive(false),
+        }
+        std::thread::sleep(period);
+    }
+}
+
+fn is_image(path: &str) -> bool {
+    let p = path.to_lowercase();
+    [".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"].iter().any(|e| p.ends_with(e))
+}
+
+/// Lê os sensores + a rede (igual ao laço de temas) num Metrics.
+fn read_metrics(sensors: &Option<sensors::Sensors>, net: &mut sensors::NetCounter) -> sensors::Metrics {
+    let mut m = match sensors {
+        Some(s) => s.snapshot(),
+        None => {
+            let mut d = sensors::Metrics::default();
+            d.ram_load = sensors::ram_load();
+            d
+        }
+    };
+    let (down, up) = net.sample();
+    m.net_down = down;
+    m.net_up = up;
+    m
+}
+
+fn describe(cfg: &config::Config) -> String {
+    match cfg.mode.as_str() {
+        "espelho" => format!("espelho ({})", cfg.mirror_fit),
+        "midia" => format!("mídia ({}, {} itens)", cfg.media_fit, cfg.media_paths.len()),
+        _ if cfg.theme == "musica" => format!("música/{} (onda {})", cfg.music_layout, cfg.music_wave),
+        _ => format!("tema {}", cfg.theme),
+    }
+}
+
+/// Modo dirigido pelo config.json (o que a GUI escreve): relê o arquivo quando muda e segue tema/música/
+/// mídia/espelho, cores, giro, brilho (agenda noturna) e tradução — tudo ao vivo.
+fn run_config(pan: &mut panel::Panel, info: &protocol::PanelInfo) {
+    let fonts = render::Fonts::load();
+    let covers = cover::Covers::new();
+    let lyrics_cache = lyrics::LyricsCache::new();
+    let sensors = match find_helper() {
+        Some(h) => {
+            println!("sensores: {h} (+áudio)");
+            sensors::Sensors::start(&h, 500, true).ok()
+        }
+        None => {
+            println!("sensorhelper.exe não achado — sensores básicos (RAM).");
+            None
+        }
+    };
+    let mut cfg = config::load();
+    let mut cfg_mtime = config::mtime();
+    let mut pal = config::palette(&cfg);
+    let mut translator = translate::Translator::new(translate::Config::from_values(
+        cfg.lyrics_translate, &cfg.lyrics_provider, &cfg.lyrics_lang, &cfg.deepl_key, &cfg.lyrics_show,
+    ));
+    let mut hist = render::History::default();
+    let mut net = sensors::NetCounter::new();
+    let mut viz = render::AudioViz::new();
+    let mut image_cache: Option<(String, String, tiny_skia::Pixmap)> = None;
+    let mut bright: i32 = -1;
+    println!("modo config.json ({}): {}", config::config_path().display(), describe(&cfg));
+    pan.keepalive(true);
+    let (mut frames, started) = (0u64, Instant::now());
+    let mut last = Instant::now();
+    loop {
+        let dt = last.elapsed().as_secs_f32();
+        last = Instant::now();
+        // relê o config.json quando a GUI o altera
+        let mt = config::mtime();
+        if mt != cfg_mtime {
+            cfg_mtime = mt;
+            cfg = config::load();
+            pal = config::palette(&cfg);
+            translator.set_config(translate::Config::from_values(
+                cfg.lyrics_translate, &cfg.lyrics_provider, &cfg.lyrics_lang, &cfg.deepl_key, &cfg.lyrics_show,
+            ));
+            image_cache = None;
+            bright = -1; // reforça o brilho na próxima volta
+            println!("config recarregado: {}", describe(&cfg));
+        }
+        let target = config::target_brightness(&cfg) as i32;
+        if target != bright {
+            bright = target;
+            pan.set_brightness(target as u8);
+        }
+        let rotation = match cfg.rotation {
+            0 | 90 | 180 | 270 => cfg.rotation as u32,
+            _ => 90,
+        };
+        let max_kb = if cfg.max_kb > 0 { cfg.max_kb as u32 } else { info.max_frame_kb() };
+        let period = Duration::from_millis((1000 / cfg.fps.clamp(1, 30) as u64).max(1));
+
+        // em modo mídia: 1ª imagem tocável da lista. Vídeo (o núcleo não decodifica) → cai no tema/música
+        // configurado, que é o que a sobreposição pretende mostrar (use `video <.djf>` p/ tocar vídeo pronto).
+        let media_img = if cfg.mode == "midia" {
+            cfg.media_paths.iter().find(|p| is_image(p) && std::path::Path::new(p.as_str()).exists()).cloned()
+        } else {
+            None
+        };
+        let frame: Option<tiny_skia::Pixmap> = if cfg.mode == "espelho" {
+            media::mirror_pixmap(&cfg.mirror_fit)
+        } else if let Some(p) = &media_img {
+            if image_cache.as_ref().map_or(true, |(ip, ifit, _)| ip != p || ifit != &cfg.media_fit) {
+                image_cache = media::image_pixmap(p, &cfg.media_fit).map(|pm| (p.clone(), cfg.media_fit.clone(), pm));
+            }
+            image_cache.as_ref().map(|(_, _, pm)| pm.clone()).or_else(|| {
+                let m = read_metrics(&sensors, &mut net);
+                Some(render::render_theme(&fonts, pal, "relogio", &m, &hist))
+            })
+        } else if cfg.theme == "musica" {
+            let audio = sensors.as_ref().and_then(|s| s.audio_snapshot());
+            viz.update(audio.as_ref(), dt);
+            let media = sensors.as_ref().and_then(|s| s.media_snapshot());
+            let lyric = if cfg.music_lyrics {
+                media.as_ref().filter(|m| !m.title.is_empty()).map(|m| lyrics_cache.get(m))
+            } else {
+                None
+            };
+            let tr = translator.for_lyrics(lyric.as_ref(), media.as_ref());
+            Some(render::render_music(&fonts, pal, &cfg.music_layout, &viz, media.as_ref(), &cfg.music_wave,
+                started.elapsed().as_secs_f32(), lyric.as_ref(), Some(&covers),
+                tr.as_ref().map(|t| t.lines.as_slice()), translator.only()))
+        } else {
+            let m = read_metrics(&sensors, &mut net);
+            hist.push(&m);
+            let theme = if render::THEMES.contains(&cfg.theme.as_str()) { cfg.theme.as_str() } else { "aneis" };
+            Some(render::render_theme(&fonts, pal, theme, &m, &hist))
+        };
+
+        match frame {
             Some(pm) => {
                 let jpeg = encode_fit(&pm, rotation, max_kb);
                 pump(pan, &jpeg, &mut frames, started);

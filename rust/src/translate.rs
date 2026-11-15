@@ -232,9 +232,20 @@ impl Config {
     /// DIGOO_TRADUZIR=<idioma> liga (pt/en/es/fr/it/de/ja/ko); DIGOO_TRADUTOR=mymemory|deepl;
     /// DIGOO_DEEPL_KEY=<chave>; DIGOO_LETRA_MOSTRAR=ambos|traducao.
     pub fn from_env() -> Config {
-        let target = std::env::var("DIGOO_TRADUZIR").unwrap_or_default().trim().to_lowercase();
-        let enabled = LANGS.contains(&target.as_str());
-        let mut provider = std::env::var("DIGOO_TRADUTOR").unwrap_or_default().trim().to_lowercase();
+        Config::from_values(
+            true,
+            &std::env::var("DIGOO_TRADUTOR").unwrap_or_default(),
+            &std::env::var("DIGOO_TRADUZIR").unwrap_or_default(),
+            &std::env::var("DIGOO_DEEPL_KEY").unwrap_or_default(),
+            &std::env::var("DIGOO_LETRA_MOSTRAR").unwrap_or_default(),
+        )
+    }
+
+    /// Constrói a config a partir do config.json (lyrics_translate / provider / lang / key / show).
+    pub fn from_values(translate: bool, provider: &str, lang: &str, key: &str, show: &str) -> Config {
+        let target = lang.trim().to_lowercase();
+        let enabled = translate && LANGS.contains(&target.as_str());
+        let mut provider = provider.trim().to_lowercase();
         if provider != "mymemory" && provider != "deepl" {
             provider = "mymemory".into();
         }
@@ -242,8 +253,8 @@ impl Config {
             enabled,
             provider,
             target: if enabled { target } else { "pt".into() },
-            key: std::env::var("DIGOO_DEEPL_KEY").unwrap_or_default(),
-            only: std::env::var("DIGOO_LETRA_MOSTRAR").unwrap_or_default().trim() == "traducao",
+            key: key.to_string(),
+            only: show.trim() == "traducao",
         }
     }
 }
@@ -271,6 +282,10 @@ impl Translator {
     }
     pub fn only(&self) -> bool {
         self.cfg.only
+    }
+    /// Troca a configuração (ao reler o config.json) sem perder o cache de traduções.
+    pub fn set_config(&mut self, cfg: Config) {
+        self.cfg = cfg;
     }
 
     fn cache_path(key: &str) -> std::path::PathBuf {
