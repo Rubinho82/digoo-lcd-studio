@@ -3,13 +3,14 @@
 Reescrita da **parte quente** do Digoo LCD Studio em Rust, focada em **pouca memória e velocidade**
 (a mesma ideia que a Discord usou: reescrever o que roda o tempo todo, não o app inteiro de uma vez).
 
-## Estado: fase 1 (base funcionando)
+## Estado: fase 2 (os 20 temas portados)
 
 Já funciona de ponta a ponta:
 - acha a tela pelo USB (`33c3:7791/7788/7792`) e fala o protocolo HONGTAI (bytes idênticos ao Python — há testes);
 - lê os sensores reaproveitando o **mesmo `sensorhelper.exe` (C#/LibreHardwareMonitor)** do app Python
   (refazer em Rust puro pioraria a cobertura de sensores) + RAM via Windows;
-- desenha um painel (tiny-skia + fontdue) e envia em **JPEG 4:2:0** (exigência da tela), com keepalive e recuperação.
+- desenha os **20 temas** (tiny-skia + fontdue, escolhidos por argumento) e envia em **JPEG 4:2:0** (exigência da
+  tela), com keepalive e recuperação.
 
 ### Medições (nesta máquina)
 | | app Python (bandeja) | núcleo Rust |
@@ -21,7 +22,8 @@ Já funciona de ponta a ponta:
 O `sensorhelper.exe` (C#) é o mesmo nos dois (~37 MB), custo compartilhado.
 
 ## Falta (roadmap)
-1. Portar os **20 temas** e os **14 modelos de música** (hoje só há um painel simples).
+1. Os **20 temas** já estão portados. Faltam os **14 modelos de música** e os sensores extras
+   (clock/potência/VRAM/ventoinhas/rede/disco — hoje aparecem como "--").
 2. Letras/tradução, biblioteca online, vídeo/GIF, espelho.
 3. Interface de configuração (provável: egui, leve) — ou manter a interface Python falando com este núcleo.
 4. Resolução/giro adaptáveis a outras telas.
