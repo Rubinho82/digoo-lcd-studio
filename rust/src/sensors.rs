@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 #[derive(Clone, Copy)]
 pub struct Metrics {
@@ -49,46 +50,125 @@ struct Row {
     value: f64,
 }
 
+/// Uma linha do helper: pode trazer sensores, áudio (espectro) ou a mídia tocando.
 #[derive(Deserialize)]
-struct Packet {
-    sensors: Vec<Row>,
+struct Line {
+    sensors: Option<Vec<Row>>,
+    audio: Option<AudioMsg>,
+    media: Option<MediaMsg>,
+}
+#[derive(Deserialize)]
+struct AudioMsg {
+    b: Option<Vec<f32>>, // 48 bandas 0..100
+    lv: Option<f32>,     // nível 0..100
+}
+#[derive(Deserialize)]
+struct MediaMsg {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    status: Option<String>,
+    app: Option<String>,
+    position: Option<f64>,
+    duration: Option<f64>,
+}
+
+/// Última leitura do espectro de áudio (loopback do PC) vinda do helper com `--audio`.
+#[derive(Clone)]
+pub struct AudioSnapshot {
+    pub bands: Vec<f32>, // 48, 0..100
+    pub level: f32,      // 0..100
+    pub ts: Instant,     // quando chegou (p/ saber se está fresco)
+}
+
+/// "Tocando agora" (Spotify/YouTube…) via GSMTC, repassado pelo helper.
+#[derive(Clone, Default)]
+pub struct MediaSnapshot {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub status: String, // "Playing" / "Paused"
+    pub app: String,
+    pub position: f64, // s
+    pub duration: f64, // s
+}
+impl From<MediaMsg> for MediaSnapshot {
+    fn from(m: MediaMsg) -> Self {
+        MediaSnapshot {
+            title: m.title.unwrap_or_default(),
+            artist: m.artist.unwrap_or_default(),
+            album: m.album.unwrap_or_default(),
+            status: m.status.unwrap_or_default(),
+            app: m.app.unwrap_or_default(),
+            position: m.position.unwrap_or(0.0),
+            duration: m.duration.unwrap_or(0.0),
+        }
+    }
 }
 
 pub struct Sensors {
     pub metrics: Arc<Mutex<Metrics>>,
+    audio: Arc<Mutex<Option<AudioSnapshot>>>,
+    media: Arc<Mutex<Option<MediaSnapshot>>>,
     child: Child,
 }
 
 impl Sensors {
-    /// Sobe o helper C# e começa a ler os sensores numa thread.
-    pub fn start(helper: &str, interval_ms: u32) -> std::io::Result<Sensors> {
-        let mut child = Command::new(helper)
-            .arg(interval_ms.to_string())
+    /// Sobe o helper C# e começa a ler numa thread. Com `with_audio` passa `--audio`
+    /// (loopback + FFT no helper) p/ receber o espectro e a mídia tocando.
+    pub fn start(helper: &str, interval_ms: u32, with_audio: bool) -> std::io::Result<Sensors> {
+        let mut cmd = Command::new(helper);
+        cmd.arg(interval_ms.to_string());
+        if with_audio {
+            cmd.arg("--audio");
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
         let metrics = Arc::new(Mutex::new(Metrics::default()));
+        let audio: Arc<Mutex<Option<AudioSnapshot>>> = Arc::new(Mutex::new(None));
+        let media: Arc<Mutex<Option<MediaSnapshot>>> = Arc::new(Mutex::new(None));
         let out = child.stdout.take().unwrap();
-        let m = metrics.clone();
+        let (m, a, md) = (metrics.clone(), audio.clone(), media.clone());
         std::thread::spawn(move || {
             let reader = BufReader::new(out);
             for line in reader.lines().map_while(Result::ok) {
-                if !line.starts_with('{') || !line.contains("\"sensors\"") {
+                if !line.starts_with('{') {
                     continue;
                 }
-                if let Ok(pkt) = serde_json::from_str::<Packet>(&line) {
+                let msg = match serde_json::from_str::<Line>(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if let Some(rows) = msg.sensors {
                     let mut cur = m.lock().unwrap();
-                    apply(&mut cur, &pkt.sensors);
+                    apply(&mut cur, &rows);
                     cur.ram_load = ram_load();
+                } else if let Some(au) = msg.audio {
+                    if let Some(b) = au.b {
+                        *a.lock().unwrap() =
+                            Some(AudioSnapshot { bands: b, level: au.lv.unwrap_or(0.0), ts: Instant::now() });
+                    }
+                } else if let Some(me) = msg.media {
+                    *md.lock().unwrap() = Some(MediaSnapshot::from(me));
                 }
             }
         });
-        Ok(Sensors { metrics, child })
+        Ok(Sensors { metrics, audio, media, child })
     }
 
     pub fn snapshot(&self) -> Metrics {
         *self.metrics.lock().unwrap()
+    }
+
+    pub fn audio_snapshot(&self) -> Option<AudioSnapshot> {
+        self.audio.lock().unwrap().clone()
+    }
+
+    pub fn media_snapshot(&self) -> Option<MediaSnapshot> {
+        self.media.lock().unwrap().clone()
     }
 }
 

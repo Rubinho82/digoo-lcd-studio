@@ -72,28 +72,36 @@ fn main() {
     let rotation = 90u32;
     let max_kb = info.max_frame_kb();
 
+    // tema: argumento (ex. `digoo-lcd neon`, ou `digoo-lcd musica-vinil` p/ o tema Música)
+    let arg = std::env::args().nth(1).unwrap_or_else(|| "aneis".into());
+    let is_music = arg == "musica" || arg.starts_with("musica-");
+    let music_layout = {
+        let l = arg.strip_prefix("musica-").unwrap_or("espectro");
+        if render::MUSIC_LAYOUTS.contains(&l) { l.to_string() } else { "espectro".to_string() }
+    };
+    let theme = if render::THEMES.contains(&arg.as_str()) { arg.clone() } else { "aneis".into() };
+    println!("tema: {}", if is_music { format!("musica/{music_layout}") } else { theme.clone() });
+
     let sensors = match find_helper() {
         Some(h) => {
-            println!("sensores: {h}");
-            sensors::Sensors::start(&h, 500).ok()
+            println!("sensores: {h}{}", if is_music { " (+áudio)" } else { "" });
+            sensors::Sensors::start(&h, 500, is_music).ok()
         }
         None => {
             println!("sensorhelper.exe não achado — mostro só o que der (RAM).");
             None
         }
     };
-
-    // tema: argumento (ex. `digoo-lcd neon`) ou "aneis"
-    let theme = std::env::args().nth(1).unwrap_or_else(|| "aneis".into());
-    let theme = if render::THEMES.contains(&theme.as_str()) { theme } else { "aneis".into() };
-    println!("tema: {theme}");
     let fonts = render::Fonts::load();
     let pal = render::Palette::default();
     pan.keepalive(true);
 
     let mut hist = render::History::default();
     let mut net = sensors::NetCounter::new();
+    let mut viz = render::AudioViz::new();
+    let period = Duration::from_millis(if is_music { 40 } else { 500 }); // música anima ~25 q/s
     let mut frames = 0u64;
+    let mut last = Instant::now();
     let started = Instant::now();
     loop {
         let mut m = match &sensors {
@@ -109,7 +117,16 @@ fn main() {
         m.net_down = down;
         m.net_up = up;
         hist.push(&m);
-        let pm = render::render_theme(&fonts, pal, &theme, &m, &hist);
+        let pm = if is_music {
+            let dt = last.elapsed().as_secs_f32();
+            last = Instant::now();
+            let audio = sensors.as_ref().and_then(|s| s.audio_snapshot());
+            viz.update(audio.as_ref(), dt);
+            let media = sensors.as_ref().and_then(|s| s.media_snapshot());
+            render::render_music(&fonts, pal, &music_layout, &viz, media.as_ref(), "circulo")
+        } else {
+            render::render_theme(&fonts, pal, &theme, &m, &hist)
+        };
         let mut quality = 92u8;
         let jpeg = loop {
             let j = render::to_jpeg(&pm, rotation, quality);
@@ -132,6 +149,6 @@ fn main() {
         if frames % 30 == 0 {
             trim_memory(); // devolve memória ociosa de tempos em tempos
         }
-        std::thread::sleep(Duration::from_millis(500)); // painel muda devagar: ~2 q/s já basta
+        std::thread::sleep(period); // 500 ms nos painéis; ~40 ms (25 q/s) na música
     }
 }

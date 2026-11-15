@@ -1,7 +1,7 @@
 //! Desenho do painel em CPU (tiny-skia) + texto (fontdue) + JPEG 4:2:0 (exigência da tela).
 //! Framework de Canvas + temas portados do app Python. 480x480.
 
-use crate::sensors::Metrics;
+use crate::sensors::{AudioSnapshot, MediaSnapshot, Metrics};
 use fontdue::Font;
 use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
 use tiny_skia::{Color, FillRule, LineCap, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
@@ -93,6 +93,7 @@ pub struct Fonts {
     reg: Font,
     bold: Font,
     mono: Font,
+    sym: Font,
 }
 impl Fonts {
     pub fn load() -> Fonts {
@@ -105,7 +106,9 @@ impl Fonts {
         let bold = f(r"C:\Windows\Fonts\segoeuib.ttf").unwrap_or_else(|| reg.clone());
         // mono p/ o tema Terminal (alinhamento de colunas); cai pra reg se faltar.
         let mono = f(r"C:\Windows\Fonts\consola.ttf").unwrap_or_else(|| reg.clone());
-        Fonts { reg, bold, mono }
+        // símbolos (nota musical ♫) p/ a música; cai pra reg se faltar.
+        let sym = f(r"C:\Windows\Fonts\seguisym.ttf").unwrap_or_else(|| reg.clone());
+        Fonts { reg, bold, mono, sym }
     }
 }
 
@@ -364,6 +367,11 @@ impl<'a> Canvas<'a> {
     /// Texto em fonte monoespaçada (tema Terminal: colunas alinhadas).
     pub fn text_mono(&mut self, s: &str, x: f32, y: f32, size: f32, col: Color, anchor: Anchor) {
         blit_text(&mut self.pm, &self.f.mono, s, x, y, size, col, anchor);
+    }
+
+    /// Texto em fonte de símbolos (nota musical ♫ do tema Música).
+    pub fn text_sym(&mut self, s: &str, x: f32, y: f32, size: f32, col: Color, anchor: Anchor) {
+        blit_text(&mut self.pm, &self.f.sym, s, x, y, size, col, anchor);
     }
 
     /// Número grande + unidade pequena, alinhados pela base.
@@ -1380,10 +1388,404 @@ pub fn render_theme(fonts: &Fonts, pal: Palette, name: &str, m: &Metrics, hist: 
     c.pm
 }
 
+// ---------------------------------------------------------------- música
+/// Espectro suavizado: as 48 bandas que chegam do helper (~30x/s) sobem rápido e descem devagar,
+/// com "tampinhas" (caps) que caem sozinhas. Persiste entre quadros (como o History), mora no main.
+pub struct AudioViz {
+    pub bands: Vec<f32>, // 48, 0..1
+    pub caps: Vec<f32>,
+    pub bass: f32,
+    pub level: f32,
+    pub active: bool,
+}
+impl AudioViz {
+    pub fn new() -> AudioViz {
+        AudioViz { bands: vec![0.0; 48], caps: vec![0.0; 48], bass: 0.0, level: 0.0, active: false }
+    }
+    pub fn update(&mut self, raw: Option<&AudioSnapshot>, dt: f32) {
+        let dt = dt.min(0.2);
+        let fresh = raw.map_or(false, |r| r.ts.elapsed().as_secs_f32() < 0.4);
+        let mut target = [0.0f32; 48];
+        if fresh {
+            let b = &raw.unwrap().bands;
+            for (i, t) in target.iter_mut().enumerate() {
+                *t = b.get(i).copied().unwrap_or(0.0) / 100.0;
+            }
+        }
+        let up = 1.0 - (-dt / 0.03).exp();
+        let down = 1.0 - (-dt / 0.18).exp();
+        for i in 0..48 {
+            let t = target[i];
+            let b = self.bands[i];
+            let nb = b + (t - b) * (if t > b { up } else { down });
+            self.bands[i] = nb;
+            self.caps[i] = if nb > self.caps[i] { nb } else { (self.caps[i] - dt * 0.45).max(0.0) };
+        }
+        let bass_t = if fresh { target[..6].iter().sum::<f32>() / 6.0 } else { 0.0 };
+        self.bass += (bass_t - self.bass) * (if bass_t > self.bass { up } else { down });
+        let lv = if fresh { raw.unwrap().level / 100.0 } else { 0.0 };
+        self.level += (lv - self.level) * (if lv > self.level { up } else { down });
+        self.active = fresh || self.bands.iter().cloned().fold(0.0f32, f32::max) > 0.02;
+    }
+}
+
+/// Nome amigável do player a partir do id do app (igual ao app_name do Python).
+fn app_name(app_id: &str) -> String {
+    let a = app_id.to_lowercase();
+    for (k, v) in [
+        ("spotify", "Spotify"), ("chrome", "Chrome"), ("msedge", "Edge"), ("firefox", "Firefox"),
+        ("opera", "Opera"), ("brave", "Brave"), ("vlc", "VLC"), ("zunemusic", "Media Player"),
+        ("deezer", "Deezer"), ("tidal", "TIDAL"), ("youtube", "YouTube Music"), ("discord", "Discord"),
+    ] {
+        if a.contains(k) {
+            return v.to_string();
+        }
+    }
+    if app_id.is_empty() {
+        String::new()
+    } else {
+        app_id.rsplit(['!', '\\']).next().unwrap_or(app_id).replace(".exe", "")
+    }
+}
+
+fn fmt_time(s: f64) -> String {
+    let s = s.max(0.0) as i64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Encolhe o texto com "…" até caber em max_w.
+fn ellipsize(c: &Canvas, text: &str, size: f32, bold: bool, max_w: f32) -> String {
+    if c.text_width(text, size, bold) <= max_w {
+        return text.to_string();
+    }
+    let mut t = text.to_string();
+    while !t.is_empty() && c.text_width(&format!("{}…", t), size, bold) > max_w {
+        t.pop();
+    }
+    format!("{}…", t.trim_end())
+}
+
+/// Quebra o texto em até `max_lines` linhas que cabem em max_w (última ganha "…" se sobrar).
+fn wrap_words(c: &Canvas, text: &str, size: f32, bold: bool, max_w: f32, max_lines: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for wd in text.split_whitespace() {
+        let trial = if cur.is_empty() { wd.to_string() } else { format!("{} {}", cur, wd) };
+        if c.text_width(&trial, size, bold) <= max_w || cur.is_empty() {
+            cur = trial;
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur = wd.to_string();
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    if lines.len() > max_lines {
+        let rest = lines[max_lines - 1..].join(" ");
+        lines.truncate(max_lines - 1);
+        lines.push(ellipsize(c, &rest, size, bold, max_w));
+    }
+    lines
+}
+
+/// Espectro em círculo, espelhado (graves embaixo nos dois lados).
+fn draw_ring(c: &mut Canvas, viz: &AudioViz, cx: f32, cy: f32, r: f32, length: f32, width: f32) {
+    let pal = c.pal;
+    let n = 48usize;
+    for i in 0..(n * 2) {
+        let k = if i < n { i } else { 2 * n - 1 - i };
+        let ang = std::f32::consts::FRAC_PI_2 + (i as f32 + 0.5) * (2.0 * std::f32::consts::PI / (2.0 * n as f32));
+        let r1 = r + 2.0;
+        let r2 = r + 4.0 + length * viz.bands[k];
+        let col = rgba(mix(pal.acc, pal.acc2, k as f32 / (n as f32 - 1.0)), 235);
+        c.line(cx + r1 * ang.cos(), cy + r1 * ang.sin(), cx + r2 * ang.cos(), cy + r2 * ang.sin(), col, width);
+    }
+}
+
+/// Espectro numa faixa horizontal: style = barras | onda | espelho.
+fn draw_bars(c: &mut Canvas, viz: &AudioViz, top: f32, bottom: f32, style: &str, x0: f32, x1: f32, glow: bool) {
+    let pal = c.pal;
+    let n = 48usize;
+    if style == "onda" {
+        let pts: Vec<(f32, f32)> = (0..n)
+            .map(|i| (x0 + (x1 - x0) * i as f32 / (n as f32 - 1.0), bottom - (bottom - top) * viz.bands[i]))
+            .collect();
+        let mut area = PathBuilder::new();
+        area.move_to(pts[0].0, pts[0].1);
+        for p in &pts[1..] {
+            area.line_to(p.0, p.1);
+        }
+        area.line_to(x1, bottom);
+        area.line_to(x0, bottom);
+        area.close();
+        c.fill_path(area, rgba(pal.acc, 70));
+        let mut ln = PathBuilder::new();
+        ln.move_to(pts[0].0, pts[0].1);
+        for p in &pts[1..] {
+            ln.line_to(p.0, p.1);
+        }
+        let (lc, lw) = if glow { (rgb(255, 255, 255), 3.0) } else { (pal.acc, 4.0) };
+        c.stroke(ln, rgba(lc, 235), lw, true);
+        return;
+    }
+    let gap = (3.0f32).min((x1 - x0) / n as f32 * 0.3);
+    let bw = (x1 - x0 - gap * (n as f32 - 1.0)) / n as f32;
+    let espelho = style == "espelho";
+    let mid = if espelho { (top + bottom) / 2.0 } else { bottom };
+    let span = (bottom - top) / (if espelho { 2.0 } else { 1.0 });
+    for i in 0..n {
+        let bx = x0 + i as f32 * (bw + gap);
+        let hgt = (span * viz.bands[i]).max(2.0);
+        let col = rgba(mix(pal.acc, pal.acc2, i as f32 / (n as f32 - 1.0)), 235);
+        let rad = (3.0f32).min(bw / 2.0);
+        if espelho {
+            c.round_rect(bx, mid - hgt, bw, 2.0 * hgt, rad, Some(col), None);
+        } else {
+            c.round_rect(bx, bottom - hgt, bw, hgt, rad, Some(col), None);
+            let cap_y = bottom - span * viz.caps[i] - 4.0;
+            c.rrect(bx, cap_y, bw, 2.0, Color::from_rgba8(255, 255, 255, 200));
+        }
+    }
+}
+
+/// Desenha o espectro no estilo `wave`: círculo (ring) ou faixa (band = top,bottom,x0,x1).
+fn draw_spectrum(c: &mut Canvas, viz: &AudioViz, wave: &str, band: (f32, f32, f32, f32), ring: Option<(f32, f32, f32, f32)>) {
+    if wave == "off" {
+        return;
+    }
+    if wave == "circulo" {
+        let (cx, cy, r, len) = ring.unwrap_or((240.0, 240.0, 150.0, 70.0));
+        draw_ring(c, viz, cx, cy, r, len, 6.0);
+        return;
+    }
+    let (top, bottom, x0, x1) = band;
+    draw_bars(c, viz, top, bottom, wave, x0, x1, false);
+}
+
+/// O que os modelos de música usam (espectro, mídia tocando, estilo de onda).
+pub struct MusicCtx<'a> {
+    pub viz: &'a AudioViz,
+    pub media: Option<&'a MediaSnapshot>,
+    pub wave: &'a str,
+}
+impl<'a> MusicCtx<'a> {
+    fn has(&self) -> bool {
+        self.media.map_or(false, |m| !m.title.is_empty())
+    }
+    fn title(&self) -> String {
+        if self.has() {
+            self.media.unwrap().title.clone()
+        } else {
+            "Nada tocando".into()
+        }
+    }
+    fn artist(&self) -> String {
+        if self.has() {
+            let m = self.media.unwrap();
+            if !m.artist.is_empty() { m.artist.clone() } else { m.album.clone() }
+        } else {
+            "Spotify, YouTube e outros players aparecem aqui".into()
+        }
+    }
+    fn t(&self, c: &mut Canvas, x: f32, y: f32, s: &str, size: f32, col: Color, bold: bool, anchor: Anchor, max_w: f32) {
+        let s = ellipsize(c, s, size, bold, max_w);
+        c.text(&s, x, y, size, col, bold, anchor);
+    }
+    fn progress(&self, c: &mut Canvas, x0: f32, x1: f32, y: f32, times: bool) {
+        if !self.has() {
+            return;
+        }
+        let m = self.media.unwrap();
+        if m.duration <= 0.0 {
+            return;
+        }
+        let (acc, muted) = (c.pal.acc, c.pal.muted);
+        c.bar(x0, y, x1 - x0, 6.0, (m.position / m.duration) as f32, acc);
+        if times {
+            c.text(&fmt_time(m.position), x0, y + 30.0, 18.0, muted, false, Anchor::Left);
+            c.text(&fmt_time(m.duration), x1, y + 30.0, 18.0, muted, false, Anchor::Right);
+        }
+    }
+    fn app_line(&self, c: &mut Canvas, x: f32, y: f32, anchor: Anchor, size: f32) {
+        if !self.has() {
+            return;
+        }
+        let m = self.media.unwrap();
+        let app = app_name(&m.app);
+        let status = if m.status == "Playing" { "tocando" } else { "pausado" };
+        let s = if app.is_empty() { status.to_string() } else { format!("{} · {}", app, status) };
+        let acc = c.pal.acc;
+        c.text(&s, x, y, size, acc, true, anchor);
+    }
+    /// Sem capa: nota musical dentro de um círculo (fallback do Python quando não há arte).
+    fn note(&self, c: &mut Canvas, cx: f32, cy: f32, r: f32) {
+        let pal = c.pal;
+        c.circle(cx, cy, r, Some(Color::from_rgba8(255, 255, 255, 18)), Some((rgba(pal.acc, 160), 3.0)));
+        c.text_sym("\u{266b}", cx, cy + r * 0.35, r * 1.1, rgba(pal.acc, 255), Anchor::Center);
+    }
+}
+
+fn layout_capa(c: &mut Canvas, x: &MusicCtx) {
+    let pal = c.pal;
+    let (cx, cy, r) = (240.0f32, 172.0f32, 98.0f32);
+    draw_spectrum(c, x.viz, x.wave, (300.0, 330.0, 8.0, W - 8.0), Some((cx, cy, r + 8.0, 52.0)));
+    x.note(c, cx, cy, r);
+    x.t(c, 240.0, 362.0, &x.title(), 34.0, pal.txt, true, Anchor::Center, W - 40.0);
+    x.t(c, 240.0, 396.0, &x.artist(), if x.has() { 24.0 } else { 18.0 }, pal.muted, false, Anchor::Center, W - 40.0);
+    x.progress(c, 40.0, W - 40.0, 426.0, true);
+    x.app_line(c, 240.0, 450.0, Anchor::Center, 18.0);
+}
+
+fn layout_vinil(c: &mut Canvas, x: &MusicCtx) {
+    let pal = c.pal;
+    let (cx, cy, r) = (240.0f32, 190.0f32, 128.0f32);
+    draw_spectrum(c, x.viz, x.wave, (330.0, 360.0, 8.0, W - 8.0), Some((cx, cy, r + 6.0, 44.0)));
+    c.disc(cx, cy, r, Color::from_rgba8(12, 12, 14, 255));
+    let mut rr = r - 6.0; // sulcos do disco
+    while rr > 56.0 {
+        c.circle(cx, cy, rr, None, Some((Color::from_rgba8(40, 40, 46, 255), 2.0)));
+        rr -= 7.0;
+    }
+    c.disc(cx, cy, 54.0, rgba(pal.acc, 255)); // etiqueta (sem capa → cor de acento)
+    c.disc(cx, cy, 6.0, Color::from_rgba8(20, 20, 24, 255));
+    c.line(430.0, 40.0, 410.0, 64.0, rgb(200, 200, 210), 6.0); // braço da agulha
+    c.line(410.0, 64.0, 345.0, 205.0, rgb(200, 200, 210), 6.0);
+    c.disc(430.0, 40.0, 12.0, Color::from_rgba8(170, 170, 180, 255));
+    x.t(c, 240.0, 362.0, &x.title(), 32.0, pal.txt, true, Anchor::Center, W - 40.0);
+    x.t(c, 240.0, 394.0, &x.artist(), if x.has() { 22.0 } else { 18.0 }, pal.muted, false, Anchor::Center, W - 40.0);
+    x.progress(c, 40.0, W - 40.0, 422.0, true);
+    x.app_line(c, 240.0, 448.0, Anchor::Center, 18.0);
+}
+
+fn layout_cartao(c: &mut Canvas, x: &MusicCtx) {
+    let pal = c.pal;
+    let s = 190.0f32;
+    x.note(c, 24.0 + s / 2.0, 36.0 + s / 2.0, s / 2.0);
+    let tx = 24.0 + s + 18.0;
+    let tw = W - tx - 20.0;
+    let lines = wrap_words(c, &x.title(), 34.0, true, tw, 2);
+    let mut y = 66.0;
+    for ln in &lines {
+        x.t(c, tx, y, ln, 34.0, pal.txt, true, Anchor::Left, tw);
+        y += 38.0;
+    }
+    x.t(c, tx, y + 6.0, &x.artist(), if x.has() { 22.0 } else { 16.0 }, pal.muted, false, Anchor::Left, tw);
+    x.app_line(c, tx, y + 44.0, Anchor::Left, 17.0);
+    x.progress(c, 24.0, W - 24.0, 252.0, true);
+    draw_spectrum(c, x.viz, x.wave, (300.0, 470.0, 8.0, W - 8.0), Some((240.0, 385.0, 52.0, 34.0)));
+}
+
+fn layout_minimal(c: &mut Canvas, x: &MusicCtx) {
+    let pal = c.pal;
+    let lines = wrap_words(c, &x.title(), 46.0, true, W - 50.0, 3);
+    let y0 = 190.0 - (lines.len() as f32 - 1.0) * 26.0;
+    for (i, ln) in lines.iter().enumerate() {
+        x.t(c, 240.0, y0 + i as f32 * 52.0, ln, 46.0, pal.txt, true, Anchor::Center, W - 40.0);
+    }
+    let ay = y0 + lines.len() as f32 * 52.0 + 6.0;
+    x.t(c, 240.0, ay, &x.artist(), if x.has() { 24.0 } else { 18.0 }, pal.acc, false, Anchor::Center, W - 40.0);
+    x.progress(c, 60.0, W - 60.0, 330.0, false);
+    let wave = if x.wave == "circulo" { "onda" } else { x.wave };
+    draw_spectrum(c, x.viz, wave, (370.0, 466.0, 8.0, W - 8.0), None);
+}
+
+fn layout_espectro(c: &mut Canvas, x: &MusicCtx) {
+    let pal = c.pal;
+    let tx = 20.0f32;
+    x.t(c, tx, 50.0, &x.title(), 28.0, pal.txt, true, Anchor::Left, W - tx - 20.0);
+    x.t(c, tx, 82.0, &x.artist(), if x.has() { 20.0 } else { 15.0 }, pal.muted, false, Anchor::Left, W - tx - 20.0);
+    draw_spectrum(c, x.viz, x.wave, (130.0, 440.0, 8.0, W - 8.0), Some((240.0, 290.0, 70.0, 90.0)));
+    x.progress(c, 20.0, W - 20.0, 452.0, false);
+}
+
+fn layout_neon(c: &mut Canvas, x: &MusicCtx) {
+    let pal = c.pal;
+    if x.has() {
+        let s = ellipsize(c, &x.title(), 40.0, true, W - 40.0);
+        c.glow_text(&s, 240.0, 76.0, 40.0, pal.acc, Anchor::Center);
+    } else {
+        x.t(c, 240.0, 76.0, &x.title(), 36.0, pal.acc, true, Anchor::Center, W - 40.0);
+    }
+    x.t(c, 240.0, 118.0, &x.artist(), if x.has() { 22.0 } else { 16.0 }, pal.txt, false, Anchor::Center, W - 40.0);
+    if x.wave != "off" {
+        if x.wave == "circulo" {
+            draw_ring(c, x.viz, 240.0, 260.0, 70.0, 70.0, 6.0);
+        } else {
+            draw_bars(c, x.viz, 170.0, 350.0, x.wave, 8.0, W - 8.0, true);
+        }
+    }
+    x.progress(c, 40.0, W - 40.0, 430.0, true);
+}
+
+/// Temas de música (modelos de music.py). Capa/vinil usam nota no lugar da arte (lote futuro).
+pub const MUSIC_LAYOUTS: &[&str] = &["capa", "vinil", "cartao", "minimal", "espectro", "neon"];
+
+/// Renderiza o tema Música no modelo `layout` com o estilo de onda `wave`.
+pub fn render_music(fonts: &Fonts, pal: Palette, layout: &str, viz: &AudioViz, media: Option<&MediaSnapshot>, wave: &str) -> Pixmap {
+    let mut c = Canvas::new(fonts, pal);
+    c.fill(rgb(8, 8, 12));
+    let ctx = MusicCtx { viz, media, wave };
+    match layout {
+        "capa" => layout_capa(&mut c, &ctx),
+        "vinil" => layout_vinil(&mut c, &ctx),
+        "cartao" => layout_cartao(&mut c, &ctx),
+        "minimal" => layout_minimal(&mut c, &ctx),
+        "neon" => layout_neon(&mut c, &ctx),
+        _ => layout_espectro(&mut c, &ctx),
+    }
+    c.pm
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sensors::Metrics;
+    use crate::sensors::{MediaSnapshot, Metrics};
+
+    #[test]
+    fn dump_music_sheet() {
+        let fonts = Fonts::load();
+        let pal = Palette::default();
+        // espectro sintético (grave forte, agudos menores) + "tocando agora"
+        let mut viz = AudioViz::new();
+        for i in 0..48 {
+            let t = i as f32 / 47.0;
+            viz.bands[i] = (0.9 * (1.0 - t) * (1.0 - t) + 0.3 * (i as f32 * 0.7).sin().abs()).min(1.0);
+            viz.caps[i] = (viz.bands[i] + 0.08).min(1.0);
+        }
+        viz.bass = 0.8;
+        viz.level = 0.6;
+        viz.active = true;
+        let media = MediaSnapshot {
+            title: "Blinding Lights".into(), artist: "The Weeknd".into(), album: String::new(),
+            status: "Playing".into(), app: "Spotify.exe".into(), position: 83.0, duration: 200.0,
+        };
+        let waves = ["circulo", "circulo", "barras", "onda", "barras", "onda"];
+        let cols = 3u32;
+        let rows = (MUSIC_LAYOUTS.len() as u32 + cols - 1) / cols;
+        let (sheet_w, sheet_h) = (cols * 480, rows * 480);
+        let mut sheet = Pixmap::new(sheet_w, sheet_h).unwrap();
+        sheet.fill(rgb(40, 40, 40));
+        for (i, layout) in MUSIC_LAYOUTS.iter().enumerate() {
+            let pm = render_music(&fonts, pal, layout, &viz, Some(&media), waves[i]);
+            let (ox, oy) = ((i as u32 % cols) * 480, (i as u32 / cols) * 480);
+            let (pw, sdata, ddata) = (pm.width(), pm.data(), sheet.data_mut());
+            for y in 0..480u32 {
+                for x in 0..480u32 {
+                    let s = ((y * pw + x) * 4) as usize;
+                    let d = (((oy + y) * sheet_w + ox + x) * 4) as usize;
+                    ddata[d..d + 4].copy_from_slice(&sdata[s..s + 4]);
+                }
+            }
+        }
+        let jpeg = to_jpeg(&sheet, 0, 90);
+        let out = std::env::temp_dir().join("digoo_music_sheet.jpg");
+        std::fs::write(&out, &jpeg).unwrap();
+        println!("folha música {}x{}: {} bytes -> {}", sheet_w, sheet_h, jpeg.len(), out.display());
+    }
 
     #[test]
     fn net_counter_reads() {
