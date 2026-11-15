@@ -3,7 +3,7 @@
 Reescrita da **parte quente** do Digoo LCD Studio em Rust, focada em **pouca memória e velocidade**
 (a mesma ideia que a Discord usou: reescrever o que roda o tempo todo, não o app inteiro de uma vez).
 
-## Estado: fase 4 (20 temas + sensores + tema Música)
+## Estado: fase 4 (20 temas + sensores + tema Música completo)
 
 Já funciona de ponta a ponta:
 - acha a tela pelo USB (`33c3:7791/7788/7792`) e fala o protocolo HONGTAI (bytes idênticos ao Python — há testes);
@@ -13,26 +13,31 @@ Já funciona de ponta a ponta:
 - desenha os **20 temas** (tiny-skia + fontdue, escolhidos por argumento) e envia em **JPEG 4:2:0** (exigência da
   tela), com keepalive e recuperação;
 - **tema Música** (`digoo-lcd musica-<modelo>`): espectro do som do PC (48 bandas via `--audio` do helper) +
-  "tocando agora", em **13 modelos** (capa, vinil, cartão, minimal, espectro, neon, cassete, aparelho, pixel,
-  ondas, rádio, polaroide, letra) — anima a ~25 q/s;
-- **letras sincronizadas** (karaokê): busca na **LRCLIB** (`ureq`, sem chave) numa thread e pinta a linha atual
-  conforme é cantada.
+  "tocando agora", em **14 modelos** (capa, vinil, cartão, minimal, espectro, neon, cassete, aparelho, pixel,
+  ondas, rádio, polaroide, letra, letra sobre a capa) — anima a ~25 q/s, com a **capa do álbum** real que o
+  player fornece (decodifica JPEG/PNG; recorte quadrado + fundo borrado como no app Python);
+- **letras sincronizadas** (karaokê): busca na **LRCLIB** (`ureq`, sem chave) numa thread, guarda no disco
+  (`%APPDATA%\DigooLCD\cache\lyrics`, os mesmos arquivos do app Python) e pinta a linha atual conforme é cantada;
+- **tradução das letras** (opcional): MyMemory (sem chave) ou DeepL (com chave), numa thread e em cache no disco;
+  ligue com `DIGOO_TRADUZIR=pt` (ou en/es/fr/it/de/ja/ko) — `DIGOO_TRADUTOR=deepl` + `DIGOO_DEEPL_KEY=…` usa o DeepL.
 
 ### Medições (nesta máquina)
 | | app Python (bandeja) | núcleo Rust |
 |---|---|---|
 | RAM (working set) | ~53 MB | **~3,7 MB** |
-| executável | 4 MB + ~264 MB de libs | **784 KB** |
+| executável | 4 MB + ~264 MB de libs | **~2,9 MB** |
 | quadros | — | ~2 q/s, 24 KB cada |
 
-O `sensorhelper.exe` (C#) é o mesmo nos dois (~37 MB), custo compartilhado.
+O executável embute a pilha TLS (`ureq`/rustls, p/ letras e tradução) e os decodificadores de capa (JPEG/PNG);
+ainda assim é uma fração das ~264 MB de bibliotecas do app Python, e a **RAM em uso** (o que importa) continua
+minúscula. O `sensorhelper.exe` (C#) é o mesmo nos dois (~37 MB), custo compartilhado.
 
 ## Falta (roadmap)
-1. Já portados: os **20 temas**, os **sensores**, **13 dos 14 modelos de música** e as **letras sincronizadas**
-   (LRCLIB). Faltam: o modelo **letra_capa**, a **tradução** das letras (MyMemory/DeepL) e as **capas de álbum**
-   (decodificar JPEG).
-2. Letras/tradução, biblioteca online, vídeo/GIF, espelho.
-3. Interface de configuração (provável: egui, leve) — ou manter a interface Python falando com este núcleo.
+1. **Tema Música completo** (feito): os 14 modelos, a capa de álbum real, as letras sincronizadas com cache em
+   disco e a tradução (MyMemory/DeepL). Falta só a tradução pela IA (Claude) e as "cores automáticas" da capa.
+2. Biblioteca online (GIF/figurinhas/anime), vídeo/GIF e espelho de tela.
+3. Interface de configuração (provável: egui, leve) — ou manter a interface Python falando com este núcleo
+   (por ora a tradução é ligada por variável de ambiente até isso existir).
 4. Resolução/giro adaptáveis a outras telas.
 
 O app Python continua sendo o completo e estável; este núcleo é a fundação da versão enxuta.

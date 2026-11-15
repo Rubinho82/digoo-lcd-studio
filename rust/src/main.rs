@@ -1,11 +1,13 @@
 //! Digoo LCD — núcleo nativo (Rust). Fase 1: acha a tela, lê os sensores pelo helper C#,
 //! desenha um painel e envia os quadros, mantendo a tela viva. Foco em pouca memória e velocidade.
 
+mod cover;
 mod lyrics;
 mod panel;
 mod protocol;
 mod render;
 mod sensors;
+mod translate;
 
 use std::time::{Duration, Instant};
 
@@ -101,6 +103,11 @@ fn main() {
     let mut net = sensors::NetCounter::new();
     let mut viz = render::AudioViz::new();
     let lyrics_cache = lyrics::LyricsCache::new();
+    let covers = cover::Covers::new();
+    let translator = translate::Translator::new(translate::Config::from_env());
+    if is_music && translator.enabled() {
+        println!("tradução de letras: ligada");
+    }
     let period = Duration::from_millis(if is_music { 40 } else { 500 }); // música anima ~25 q/s
     let mut frames = 0u64;
     let mut last = Instant::now();
@@ -126,7 +133,10 @@ fn main() {
             viz.update(audio.as_ref(), dt);
             let media = sensors.as_ref().and_then(|s| s.media_snapshot());
             let lyric = media.as_ref().filter(|m| !m.title.is_empty()).map(|m| lyrics_cache.get(m));
-            render::render_music(&fonts, pal, &music_layout, &viz, media.as_ref(), "circulo", started.elapsed().as_secs_f32(), lyric.as_ref())
+            let tr = translator.for_lyrics(lyric.as_ref(), media.as_ref());
+            render::render_music(&fonts, pal, &music_layout, &viz, media.as_ref(), "circulo",
+                started.elapsed().as_secs_f32(), lyric.as_ref(), Some(&covers),
+                tr.as_ref().map(|t| t.lines.as_slice()), translator.only())
         } else {
             render::render_theme(&fonts, pal, &theme, &m, &hist)
         };

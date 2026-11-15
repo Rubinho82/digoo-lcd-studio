@@ -71,6 +71,7 @@ struct MediaMsg {
     app: Option<String>,
     position: Option<f64>,
     duration: Option<f64>,
+    cover: Option<String>, // caminho do arquivo da miniatura que o helper salvou
 }
 
 /// Última leitura do espectro de áudio (loopback do PC) vinda do helper com `--audio`.
@@ -89,8 +90,9 @@ pub struct MediaSnapshot {
     pub album: String,
     pub status: String, // "Playing" / "Paused"
     pub app: String,
-    pub position: f64, // s
-    pub duration: f64, // s
+    pub position: f64,  // s
+    pub duration: f64,  // s
+    pub cover: String,  // caminho do arquivo da capa (vazio = sem arte)
 }
 impl From<MediaMsg> for MediaSnapshot {
     fn from(m: MediaMsg) -> Self {
@@ -102,6 +104,7 @@ impl From<MediaMsg> for MediaSnapshot {
             app: m.app.unwrap_or_default(),
             position: m.position.unwrap_or(0.0),
             duration: m.duration.unwrap_or(0.0),
+            cover: m.cover.unwrap_or_default(),
         }
     }
 }
@@ -110,6 +113,7 @@ pub struct Sensors {
     pub metrics: Arc<Mutex<Metrics>>,
     audio: Arc<Mutex<Option<AudioSnapshot>>>,
     media: Arc<Mutex<Option<MediaSnapshot>>>,
+    media_at: Arc<Mutex<Instant>>, // quando chegou a última mídia (p/ avançar a posição)
     child: Child,
 }
 
@@ -130,8 +134,9 @@ impl Sensors {
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let audio: Arc<Mutex<Option<AudioSnapshot>>> = Arc::new(Mutex::new(None));
         let media: Arc<Mutex<Option<MediaSnapshot>>> = Arc::new(Mutex::new(None));
+        let media_at = Arc::new(Mutex::new(Instant::now()));
         let out = child.stdout.take().unwrap();
-        let (m, a, md) = (metrics.clone(), audio.clone(), media.clone());
+        let (m, a, md, mt) = (metrics.clone(), audio.clone(), media.clone(), media_at.clone());
         std::thread::spawn(move || {
             let reader = BufReader::new(out);
             for line in reader.lines().map_while(Result::ok) {
@@ -153,10 +158,11 @@ impl Sensors {
                     }
                 } else if let Some(me) = msg.media {
                     *md.lock().unwrap() = Some(MediaSnapshot::from(me));
+                    *mt.lock().unwrap() = Instant::now();
                 }
             }
         });
-        Ok(Sensors { metrics, audio, media, child })
+        Ok(Sensors { metrics, audio, media, media_at, child })
     }
 
     pub fn snapshot(&self) -> Metrics {
@@ -168,7 +174,13 @@ impl Sensors {
     }
 
     pub fn media_snapshot(&self) -> Option<MediaSnapshot> {
-        self.media.lock().unwrap().clone()
+        let mut m = self.media.lock().unwrap().clone()?;
+        // o helper só reemite a mídia a cada ~5 s: avança a posição pelo tempo decorrido (como o Python)
+        if m.status == "Playing" && m.duration > 0.0 {
+            let elapsed = self.media_at.lock().unwrap().elapsed().as_secs_f64();
+            m.position = (m.position + elapsed).min(m.duration);
+        }
+        Some(m)
     }
 }
 

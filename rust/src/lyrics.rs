@@ -1,15 +1,16 @@
 //! Letras sincronizadas via LRCLIB (lrclib.net — aberto, sem chave). Porte fiel do lyrics.py:
-//! busca numa thread (uma música por vez), guarda em memória. Cache em disco fica p/ depois.
+//! busca numa thread (uma música por vez), guarda em memória e no disco (mesmos arquivos do app Python).
 
 use crate::sensors::MediaSnapshot;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const API: &str = "https://lrclib.net/api";
 const UA: &str = "DigooLCDStudio (https://github.com/Rubinho82/digoo-lcd-studio)";
 const ERROR_RETRY: f32 = 15.0; // falha de rede: janela curta p/ tentar de novo
+const NOT_FOUND_RETRY: f64 = 3.0 * 86400.0; // letra que não existia: tenta de novo depois de 3 dias
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum LyricState {
@@ -308,7 +309,78 @@ pub fn key(media: &MediaSnapshot) -> String {
     format!("{}|{}", media.title.trim().to_lowercase(), media.artist.trim().to_lowercase())
 }
 
-/// Busca as letras numa thread (uma por vez) e guarda em memória; devolve na hora o que já tem.
+/// Pasta de cache compartilhada com o app Python: %APPDATA%\DigooLCD\cache\lyrics.
+pub fn cache_dir() -> std::path::PathBuf {
+    std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("DigooLCD")
+        .join("cache")
+        .join("lyrics")
+}
+
+/// SHA-1 em hex (40 chars). Usado p/ nomear os arquivos de cache igual ao Python (sha1(chave)).
+pub fn sha1_hex(input: &str) -> String {
+    let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
+    let mut msg = input.as_bytes().to_vec();
+    let ml = (msg.len() as u64) * 8;
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&ml.to_be_bytes());
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 80];
+        for (i, word) in w.iter_mut().take(16).enumerate() {
+            *word = u32::from_be_bytes([chunk[i * 4], chunk[i * 4 + 1], chunk[i * 4 + 2], chunk[i * 4 + 3]]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
+        for (i, &wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+                _ => (b ^ c ^ d, 0xCA62_C1D6),
+            };
+            let tmp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = tmp;
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+    }
+    h.iter().map(|x| format!("{x:08x}")).collect()
+}
+
+fn now_unix() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+/// Formato do arquivo de cache (igual ao Python): a letra crua, ou o selo {none,t} de "não existe".
+#[derive(Serialize, Deserialize, Default)]
+struct DiskRec {
+    #[serde(rename = "syncedLyrics", skip_serializing_if = "Option::is_none")]
+    synced: Option<String>,
+    #[serde(rename = "plainLyrics", skip_serializing_if = "Option::is_none")]
+    plain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instrumental: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    none: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    t: Option<f64>,
+}
+
+/// Busca as letras numa thread (uma por vez) e guarda em memória + disco; devolve na hora o que já tem.
 pub struct LyricsCache {
     mem: Arc<Mutex<HashMap<String, Lyric>>>,
     errors: Arc<Mutex<HashMap<String, Instant>>>,
@@ -333,6 +405,10 @@ impl LyricsCache {
                 return Lyric::simple(LyricState::Error);
             }
         }
+        if let Some(l) = Self::load_disk(&k) {
+            self.mem.lock().unwrap().insert(k, l.clone());
+            return l;
+        }
         let mut busy = self.busy.lock().unwrap();
         if !*busy {
             *busy = true;
@@ -341,6 +417,7 @@ impl LyricsCache {
             std::thread::spawn(move || {
                 match fetch(&media2) {
                     Ok(rec) => {
+                        LyricsCache::save_disk(&k2, rec.as_ref());
                         mem.lock().unwrap().insert(k2, to_lyric(rec));
                     }
                     Err(_) => {
@@ -351,6 +428,30 @@ impl LyricsCache {
             });
         }
         Lyric::simple(LyricState::Searching)
+    }
+
+    /// Lê a letra do disco (None = sem cache, ou "não existe" já vencido — vale buscar de novo).
+    fn load_disk(k: &str) -> Option<Lyric> {
+        let path = cache_dir().join(format!("{}.json", &sha1_hex(k)[..20]));
+        let d: DiskRec = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        if d.none.unwrap_or(false) {
+            return (now_unix() - d.t.unwrap_or(0.0) < NOT_FOUND_RETRY).then(|| Lyric::simple(LyricState::None));
+        }
+        Some(to_lyric(Some(LrcRec { synced: d.synced, plain: d.plain, instrumental: d.instrumental, duration: None })))
+    }
+
+    /// Grava no disco a letra crua (ou o selo de "não existe") — mesmo arquivo que o app Python lê.
+    fn save_disk(k: &str, rec: Option<&LrcRec>) {
+        let _ = std::fs::create_dir_all(cache_dir());
+        let disk = match rec {
+            Some(r) => DiskRec {
+                synced: r.synced.clone(), plain: r.plain.clone(), instrumental: r.instrumental, none: None, t: None,
+            },
+            None => DiskRec { none: Some(true), t: Some(now_unix()), ..Default::default() },
+        };
+        if let Ok(s) = serde_json::to_string(&disk) {
+            let _ = std::fs::write(cache_dir().join(format!("{}.json", &sha1_hex(k)[..20])), s);
+        }
     }
 }
 
@@ -375,11 +476,20 @@ mod tests {
     }
 
     #[test]
+    fn sha1_vetores() {
+        // vetores conhecidos: garante que o nome do arquivo de cache bate com o do Python (hashlib.sha1)
+        assert_eq!(sha1_hex(""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        assert_eq!(sha1_hex("abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(&sha1_hex("blinding lights|the weeknd")[..20], &sha1_hex("blinding lights|the weeknd")[..20]);
+    }
+
+    #[test]
     fn fetch_ao_vivo() {
         // valida o caminho HTTP+LRCLIB de ponta a ponta (música que existe no banco).
         let m = MediaSnapshot {
             title: "Blinding Lights".into(), artist: "The Weeknd".into(), album: String::new(),
             status: "Playing".into(), app: "Spotify.exe".into(), position: 0.0, duration: 200.0,
+            cover: String::new(),
         };
         let cache = LyricsCache::new();
         let mut lyr = cache.get(&m);

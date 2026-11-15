@@ -1,11 +1,12 @@
 //! Desenho do painel em CPU (tiny-skia) + texto (fontdue) + JPEG 4:2:0 (exigência da tela).
 //! Framework de Canvas + temas portados do app Python. 480x480.
 
+use crate::cover::Covers;
 use crate::lyrics::{Lyric, LyricState};
 use crate::sensors::{AudioSnapshot, MediaSnapshot, Metrics};
 use fontdue::Font;
 use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
-use tiny_skia::{Color, FillRule, LineCap, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use tiny_skia::{Color, FillRule, LineCap, Paint, PathBuilder, PixmapPaint, Pixmap, Rect, Stroke, Transform};
 
 pub const W: f32 = 480.0;
 pub const H: f32 = 480.0;
@@ -404,6 +405,21 @@ impl<'a> Canvas<'a> {
         let c = now();
         self.text(title, 28.0, 36.0, 24.0, self.pal.acc, true, Anchor::Left);
         self.text(&format!("{:02}:{:02}", c.h, c.m), W - 28.0, 36.0, 24.0, self.pal.txt, false, Anchor::Right);
+    }
+
+    /// Desenha uma capa (pixmap já decodificado) em (x,y). `radius>0` arredonda os cantos
+    /// (radius = lado/2 vira círculo); `radius==0` deixa quadrada.
+    pub fn blit_cover(&mut self, cov: &Pixmap, x: f32, y: f32, radius: f32) {
+        let mut c = cov.clone();
+        if radius > 0.0 {
+            crate::cover::mask_round(&mut c, radius);
+        }
+        self.pm.draw_pixmap(x as i32, y as i32, c.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+    }
+
+    /// Fundo inteiro (480×480) a partir de um pixmap do mesmo tamanho (capa borrada da letra_capa).
+    pub fn blit_bg(&mut self, bg: &Pixmap) {
+        self.pm.draw_pixmap(0, 0, bg.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
     }
 
     pub fn into_jpeg(self, rotation: u32, quality: u8) -> Vec<u8> {
@@ -1574,10 +1590,50 @@ pub struct MusicCtx<'a> {
     pub wave: &'a str,
     pub anim: f32, // segundos contínuos (p/ carretéis, ondas, giros)
     pub lyric: Option<&'a Lyric>,
+    pub covers: Option<&'a Covers>,
+    pub tr: Option<&'a [String]>, // tradução alinhada com lyric.lines (None = sem tradução)
+    pub tr_only: bool,            // mostrar só a tradução (em vez de original + tradução embaixo)
 }
 impl<'a> MusicCtx<'a> {
     fn has(&self) -> bool {
         self.media.map_or(false, |m| !m.title.is_empty())
+    }
+    /// Capa quadrada `size` (ou None sem capa/sem arte). Decodifica+recorta uma vez por faixa.
+    fn cover(&self, size: u32) -> Option<Pixmap> {
+        let m = self.media?;
+        if m.title.is_empty() || m.cover.is_empty() {
+            return None;
+        }
+        self.covers?.fit(&m.cover, size)
+    }
+    /// Fundo 480×480 da capa, borrado e escurecido (letra sobre a capa).
+    fn cover_bg(&self) -> Option<Pixmap> {
+        let m = self.media?;
+        if m.cover.is_empty() {
+            return None;
+        }
+        self.covers?.bg(&m.cover)
+    }
+    /// Texto principal da linha k da letra (tradução quando `tr_only`, senão o original).
+    fn lyr_main(&self, lyr: &Lyric, k: usize) -> String {
+        if self.tr_only {
+            if let Some(tr) = self.tr {
+                if k < tr.len() && !lyr.lines[k].1.trim().is_empty() && !tr[k].is_empty() {
+                    return tr[k].clone();
+                }
+            }
+        }
+        lyr.lines[k].1.clone()
+    }
+    /// Tradução a mostrar embaixo da linha k (só no modo "ambos", e só se diferir do original).
+    fn lyr_sub(&self, lyr: &Lyric, k: usize) -> String {
+        if self.tr_only {
+            return String::new();
+        }
+        match self.tr {
+            Some(tr) if k < tr.len() && tr[k] != lyr.lines[k].1.trim() => tr[k].clone(),
+            _ => String::new(),
+        }
     }
     fn title(&self) -> String {
         if self.has() {
@@ -1636,7 +1692,10 @@ fn layout_capa(c: &mut Canvas, x: &MusicCtx) {
     let pal = c.pal;
     let (cx, cy, r) = (240.0f32, 172.0f32, 98.0f32);
     draw_spectrum(c, x.viz, x.wave, (300.0, 330.0, 8.0, W - 8.0), Some((cx, cy, r + 8.0, 52.0)));
-    x.note(c, cx, cy, r);
+    match x.cover(196) {
+        Some(cov) => c.blit_cover(&cov, cx - 98.0, cy - 98.0, 26.0),
+        None => x.note(c, cx, cy, r),
+    }
     x.t(c, 240.0, 362.0, &x.title(), 34.0, pal.txt, true, Anchor::Center, W - 40.0);
     x.t(c, 240.0, 396.0, &x.artist(), if x.has() { 24.0 } else { 18.0 }, pal.muted, false, Anchor::Center, W - 40.0);
     x.progress(c, 40.0, W - 40.0, 426.0, true);
@@ -1653,7 +1712,10 @@ fn layout_vinil(c: &mut Canvas, x: &MusicCtx) {
         c.circle(cx, cy, rr, None, Some((Color::from_rgba8(40, 40, 46, 255), 2.0)));
         rr -= 7.0;
     }
-    c.disc(cx, cy, 54.0, rgba(pal.acc, 255)); // etiqueta (sem capa → cor de acento)
+    match x.cover(108) {
+        Some(cov) => c.blit_cover(&cov, cx - 54.0, cy - 54.0, 54.0), // etiqueta = capa redonda
+        None => c.disc(cx, cy, 54.0, rgba(pal.acc, 255)),
+    }
     c.disc(cx, cy, 6.0, Color::from_rgba8(20, 20, 24, 255));
     c.line(430.0, 40.0, 410.0, 64.0, rgb(200, 200, 210), 6.0); // braço da agulha
     c.line(410.0, 64.0, 345.0, 205.0, rgb(200, 200, 210), 6.0);
@@ -1667,7 +1729,10 @@ fn layout_vinil(c: &mut Canvas, x: &MusicCtx) {
 fn layout_cartao(c: &mut Canvas, x: &MusicCtx) {
     let pal = c.pal;
     let s = 190.0f32;
-    x.note(c, 24.0 + s / 2.0, 36.0 + s / 2.0, s / 2.0);
+    match x.cover(190) {
+        Some(cov) => c.blit_cover(&cov, 24.0, 36.0, 18.0),
+        None => x.note(c, 24.0 + s / 2.0, 36.0 + s / 2.0, s / 2.0),
+    }
     let tx = 24.0 + s + 18.0;
     let tw = W - tx - 20.0;
     let lines = wrap_words(c, &x.title(), 34.0, true, tw, 2);
@@ -1698,7 +1763,13 @@ fn layout_minimal(c: &mut Canvas, x: &MusicCtx) {
 
 fn layout_espectro(c: &mut Canvas, x: &MusicCtx) {
     let pal = c.pal;
-    let tx = 20.0f32;
+    let tx = match x.cover(84) {
+        Some(cov) => {
+            c.blit_cover(&cov, 20.0, 20.0, 12.0);
+            120.0
+        }
+        None => 20.0,
+    };
     x.t(c, tx, 50.0, &x.title(), 28.0, pal.txt, true, Anchor::Left, W - tx - 20.0);
     x.t(c, tx, 82.0, &x.artist(), if x.has() { 20.0 } else { 15.0 }, pal.muted, false, Anchor::Left, W - tx - 20.0);
     draw_spectrum(c, x.viz, x.wave, (130.0, 440.0, 8.0, W - 8.0), Some((240.0, 290.0, 70.0, 90.0)));
@@ -1937,8 +2008,13 @@ fn layout_polaroid(c: &mut Canvas, x: &MusicCtx) {
     let (cx0, cy0) = ((W - cw) / 2.0, 30.0f32);
     c.rrect(cx0 + 8.0, cy0 + 10.0, cw, ch, Color::from_rgba8(0, 0, 0, 90)); // sombra
     c.rrect(cx0, cy0, cw, ch, rgb(245, 242, 236));
-    c.rrect(cx0 + 20.0, cy0 + 20.0, 250.0, 250.0, rgba(pal.acc, 255)); // "foto" (sem capa → acento)
-    c.text_sym("\u{266b}", cx0 + 145.0, cy0 + 165.0, 90.0, Color::from_rgba8(255, 255, 255, 210), Anchor::Center);
+    match x.cover(250) {
+        Some(cov) => c.blit_cover(&cov, cx0 + 20.0, cy0 + 20.0, 4.0), // a "foto" = capa
+        None => {
+            c.rrect(cx0 + 20.0, cy0 + 20.0, 250.0, 250.0, rgba(pal.acc, 255)); // sem capa → acento
+            c.text_sym("\u{266b}", cx0 + 145.0, cy0 + 165.0, 90.0, Color::from_rgba8(255, 255, 255, 210), Anchor::Center);
+        }
+    }
     let title = ellipsize(c, &x.title(), 26.0, true, 260.0);
     c.text(&title, cx0 + 145.0, cy0 + 300.0, 26.0, rgb(40, 40, 46), true, Anchor::Center);
     x.t(c, 240.0, 416.0, &x.artist(), if x.has() { 24.0 } else { 16.0 }, pal.txt, false, Anchor::Center, W - 40.0);
@@ -1949,8 +2025,15 @@ fn layout_polaroid(c: &mut Canvas, x: &MusicCtx) {
 /// Cabeçalho de música: título + artista no topo à esquerda (sem capa).
 fn music_header(c: &mut Canvas, x: &MusicCtx) {
     let pal = c.pal;
-    x.t(c, 20.0, 38.0, &x.title(), 24.0, pal.txt, true, Anchor::Left, W - 40.0);
-    x.t(c, 20.0, 64.0, &x.artist(), 17.0, pal.muted, false, Anchor::Left, W - 40.0);
+    let tx = match x.cover(64) {
+        Some(cov) => {
+            c.blit_cover(&cov, 20.0, 18.0, 12.0);
+            98.0
+        }
+        None => 20.0,
+    };
+    x.t(c, tx, 38.0, &x.title(), 24.0, pal.txt, true, Anchor::Left, W - tx - 20.0);
+    x.t(c, tx, 64.0, &x.artist(), 17.0, pal.muted, false, Anchor::Left, W - tx - 20.0);
 }
 
 /// Texto com "varrição" de karaokê: pinta os caracteres já cantados (até `frac`) com `hi`.
@@ -1994,19 +2077,24 @@ fn layout_letra(c: &mut Canvas, x: &MusicCtx) {
         let pos = x.media.map_or(0.0, |m| m.position) as f32;
         let (i, frac, _since) = l.at(pos, dur);
         let cur = i.max(0) as usize;
-        let line = &l.lines[cur].1;
+        let line = x.lyr_main(l, cur);
         let fr = if l.synced { frac } else { 0.0 };
-        sweep_text(c, 240.0, cy, if line.is_empty() { "♪" } else { line }, 32.0, fr, pal.txt, pal.acc);
+        sweep_text(c, 240.0, cy, if line.is_empty() { "♪" } else { &line }, 32.0, fr, pal.txt, pal.acc);
+        let sub = x.lyr_sub(l, cur); // tradução da linha atual, embaixo dela
+        if !sub.is_empty() {
+            let s = ellipsize(c, &sub, 22.0, false, W - 40.0);
+            c.text(&s, 240.0, cy + 30.0, 22.0, mix(pal.acc2, pal.txt, 0.3), false, Anchor::Center);
+        }
         for d in 1..=3i32 {
             let dim = mix(pal.txt, bg, 0.25 + 0.22 * d as f32); // mais longe = mais apagada
             let up = cur as i32 - d;
             if up >= 0 {
-                let s = ellipsize(c, &l.lines[up as usize].1, 24.0, false, W - 40.0);
+                let s = ellipsize(c, &x.lyr_main(l, up as usize), 24.0, false, W - 40.0);
                 c.text(&s, 240.0, cy - d as f32 * step, 24.0, dim, false, Anchor::Center);
             }
             let dn = cur + d as usize;
             if dn < l.lines.len() {
-                let s = ellipsize(c, &l.lines[dn].1, 24.0, false, W - 40.0);
+                let s = ellipsize(c, &x.lyr_main(l, dn), 24.0, false, W - 40.0);
                 c.text(&s, 240.0, cy + d as f32 * step, 24.0, dim, false, Anchor::Center);
             }
         }
@@ -2020,18 +2108,147 @@ fn layout_letra(c: &mut Canvas, x: &MusicCtx) {
     }
 }
 
-/// Temas de música (modelos de music.py + music_extra.py). Sem capa de álbum ainda → nota ♫.
+/// Letra grande à esquerda sobre a capa borrada, rolando sozinha (porte de music_extra._layout_letra_capa).
+fn layout_letra_capa(c: &mut Canvas, x: &MusicCtx) {
+    use std::collections::HashMap;
+    let pal = c.pal;
+    if let Some(bg) = x.cover_bg() {
+        c.blit_bg(&bg); // capa borrada e escurecida cobrindo a tela
+    }
+    c.rrect(0.0, 0.0, W, H, Color::from_rgba8(0, 0, 0, 80)); // escurece mais p/ a letra ler bem
+    let dark = rgb(6, 6, 10); // "apagar" texto = misturar rumo a este tom (blit_text ignora alfa)
+    let ok = x.lyric.map_or(false, |l| l.state == LyricState::Ok && !l.lines.is_empty());
+    if ok {
+        let l = x.lyric.unwrap();
+        let n = l.lines.len() as i32;
+        let dur = x.media.map_or(0.0, |m| m.duration) as f32;
+        let pos = x.media.map_or(0.0, |m| m.position) as f32;
+        let (i, _frac, since) = l.at(pos, dur);
+        let main = |k: i32| -> String {
+            if k == -1 {
+                "♪".into()
+            } else if k >= 0 && k < n {
+                x.lyr_main(l, k as usize)
+            } else {
+                String::new()
+            }
+        };
+        let sub = |k: i32| -> String {
+            if k >= 0 && k < n {
+                x.lyr_sub(l, k as usize)
+            } else {
+                String::new()
+            }
+        };
+        // quebra as linhas visíveis (atual ± vizinhas) e mede a altura de cada bloco
+        let mut blocks: HashMap<i32, Vec<String>> = HashMap::new();
+        let mut subs: HashMap<i32, Vec<String>> = HashMap::new();
+        for k in (i - 3).max(-1)..=(i + 5) {
+            let t = main(k);
+            if !t.is_empty() {
+                blocks.insert(k, wrap_words(c, &t, 34.0, true, W - 56.0, 3));
+                let s = sub(k);
+                let sl = if s.is_empty() { Vec::new() } else { wrap_words(c, &s, 24.0, false, W - 56.0, 2) };
+                subs.insert(k, sl);
+            }
+        }
+        let height = |k: i32| -> f32 {
+            blocks.get(&k).map_or(0.0, |b| {
+                b.len() as f32 * 40.0 + subs.get(&k).map_or(0, |s| s.len()) as f32 * 30.0 + 22.0
+            })
+        };
+        // sobe suavemente quando troca de linha (como no karaokê)
+        let ease = if l.synced {
+            let e = (since / 0.35).clamp(0.0, 1.0);
+            1.0 - (1.0 - e).powi(3)
+        } else {
+            1.0
+        };
+        let prev_h = if blocks.contains_key(&(i - 1)) { height(i - 1) } else { 0.0 };
+        let y = 190.0 + (1.0 - ease) * prev_h - if blocks.contains_key(&i) { height(i) / 2.0 } else { 0.0 };
+        let mut ys: HashMap<i32, f32> = HashMap::new();
+        ys.insert(i, y);
+        let mut yy = y;
+        for k in (i - 3..=i - 1).rev() {
+            if !blocks.contains_key(&k) {
+                break;
+            }
+            yy -= height(k);
+            ys.insert(k, yy);
+        }
+        yy = y + if blocks.contains_key(&i) { height(i) } else { 0.0 };
+        for k in i + 1..=i + 5 {
+            if !blocks.contains_key(&k) {
+                break;
+            }
+            ys.insert(k, yy);
+            yy += height(k);
+        }
+        for (&k, blk) in &blocks {
+            let y0 = match ys.get(&k) {
+                Some(v) => *v,
+                None => continue,
+            };
+            let cur = k == i;
+            let main_col = if cur { pal.txt } else { mix(pal.txt, dark, if k < i { 0.55 } else { 0.68 }) };
+            for (nn, ln) in blk.iter().enumerate() {
+                let ly = y0 + nn as f32 * 40.0 + 20.0;
+                if (36.0..=384.0).contains(&ly) {
+                    c.text(ln, 28.0, ly, 34.0, main_col, true, Anchor::Left);
+                }
+            }
+            let base_sub = mix(pal.acc2, pal.txt, 0.3);
+            let sub_col = if cur { base_sub } else { mix(base_sub, dark, 0.7) };
+            for (nn, ln) in subs.get(&k).into_iter().flatten().enumerate() {
+                let ly = y0 + blk.len() as f32 * 40.0 + nn as f32 * 30.0 + 14.0;
+                if (36.0..=384.0).contains(&ly) {
+                    c.text(ln, 28.0, ly, 24.0, sub_col, false, Anchor::Left);
+                }
+            }
+        }
+    } else {
+        let msg = lyric_message(x.lyric, x.has());
+        x.t(c, 240.0, 200.0, msg, 28.0, pal.txt, true, Anchor::Center, W - 40.0);
+    }
+    c.rrect(0.0, 396.0, W, H - 396.0, Color::from_rgba8(0, 0, 0, 110)); // faixa escura embaixo
+    let tx = match x.cover(52) {
+        Some(cov) => {
+            c.blit_cover(&cov, 24.0, 404.0, 10.0);
+            90.0
+        }
+        None => 24.0,
+    };
+    x.t(c, tx, 418.0, &x.title(), 21.0, pal.txt, true, Anchor::Left, W - tx - 24.0);
+    x.t(c, tx, 442.0, &x.artist(), 16.0, pal.muted, false, Anchor::Left, W - tx - 24.0);
+    x.progress(c, 24.0, W - 24.0, 464.0, false);
+}
+
+/// Temas de música (modelos de music.py + music_extra.py). Capa de álbum real quando o player a fornece.
 pub const MUSIC_LAYOUTS: &[&str] = &[
-    "capa", "vinil", "cartao", "minimal", "espectro", "neon", "cassete", "aparelho", "pixel", "ondas", "radio", "polaroid", "letra",
+    "capa", "vinil", "cartao", "minimal", "espectro", "neon", "cassete", "aparelho", "pixel", "ondas", "radio", "polaroid", "letra", "letra_capa",
 ];
 
 /// Renderiza o tema Música no modelo `layout` com o estilo de onda `wave`.
-pub fn render_music(fonts: &Fonts, pal: Palette, layout: &str, viz: &AudioViz, media: Option<&MediaSnapshot>, wave: &str, anim: f32, lyric: Option<&Lyric>) -> Pixmap {
+#[allow(clippy::too_many_arguments)]
+pub fn render_music(
+    fonts: &Fonts,
+    pal: Palette,
+    layout: &str,
+    viz: &AudioViz,
+    media: Option<&MediaSnapshot>,
+    wave: &str,
+    anim: f32,
+    lyric: Option<&Lyric>,
+    covers: Option<&Covers>,
+    tr: Option<&[String]>,
+    tr_only: bool,
+) -> Pixmap {
     let mut c = Canvas::new(fonts, pal);
     c.fill(rgb(8, 8, 12));
-    let ctx = MusicCtx { viz, media, wave, anim, lyric };
+    let ctx = MusicCtx { viz, media, wave, anim, lyric, covers, tr, tr_only };
     match layout {
         "letra" => layout_letra(&mut c, &ctx),
+        "letra_capa" => layout_letra_capa(&mut c, &ctx),
         "capa" => layout_capa(&mut c, &ctx),
         "vinil" => layout_vinil(&mut c, &ctx),
         "cartao" => layout_cartao(&mut c, &ctx),
@@ -2068,10 +2285,37 @@ mod tests {
         viz.bass = 0.8;
         viz.level = 0.6;
         viz.active = true;
+        // capa sintética (degradê) p/ exercitar o decode + a máscara nas folhas
+        let cover_path = std::env::temp_dir().join("digoo_cover_test.jpg");
+        {
+            let (cw, ch) = (300usize, 300usize);
+            let mut rgb = vec![0u8; cw * ch * 3];
+            for y in 0..ch {
+                for xx in 0..cw {
+                    let d = (y * cw + xx) * 3;
+                    rgb[d] = (xx * 255 / cw) as u8;
+                    rgb[d + 1] = (y * 255 / ch) as u8;
+                    rgb[d + 2] = (200 - y * 160 / ch) as u8;
+                }
+            }
+            let mut buf = Vec::new();
+            let mut enc = Encoder::new(&mut buf, 90);
+            enc.encode(&rgb, cw as u16, ch as u16, ColorType::Rgb).unwrap();
+            std::fs::write(&cover_path, &buf).unwrap();
+        }
+        let covers = crate::cover::Covers::new();
         let media = MediaSnapshot {
             title: "Blinding Lights".into(), artist: "The Weeknd".into(), album: String::new(),
             status: "Playing".into(), app: "Spotify.exe".into(), position: 83.0, duration: 200.0,
+            cover: cover_path.to_string_lossy().into_owned(),
         };
+        // tradução sintética alinhada com a letra (mostra o modo "ambos" em letra/letra_capa)
+        let tr: Vec<String> = vec![
+            "Estou cego pelas luzes".into(),
+            "Não consigo dormir sem sentir seu toque".into(),
+            "Eu disse, ooh, estou me afogando na noite".into(),
+            "Ah, quando estou assim, é em você que confio".into(),
+        ];
         let lyric = Lyric {
             state: LyricState::Ok,
             synced: true,
@@ -2089,7 +2333,7 @@ mod tests {
         let mut sheet = Pixmap::new(sheet_w, sheet_h).unwrap();
         sheet.fill(rgb(40, 40, 40));
         for (i, layout) in MUSIC_LAYOUTS.iter().enumerate() {
-            let pm = render_music(&fonts, pal, layout, &viz, Some(&media), waves[i % waves.len()], 1.3, Some(&lyric));
+            let pm = render_music(&fonts, pal, layout, &viz, Some(&media), waves[i % waves.len()], 1.3, Some(&lyric), Some(&covers), Some(&tr), false);
             let (ox, oy) = ((i as u32 % cols) * 480, (i as u32 / cols) * 480);
             let (pw, sdata, ddata) = (pm.width(), pm.data(), sheet.data_mut());
             for y in 0..480u32 {
