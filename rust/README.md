@@ -3,7 +3,7 @@
 Reescrita da **parte quente** do Digoo LCD Studio em Rust, focada em **pouca memória e velocidade**
 (a mesma ideia que a Discord usou: reescrever o que roda o tempo todo, não o app inteiro de uma vez).
 
-## Estado: fase 4 (20 temas + sensores + tema Música completo)
+## Estado: fase 5 (20 temas + sensores + música + fontes de mídia)
 
 Já funciona de ponta a ponta:
 - acha a tela pelo USB (`33c3:7791/7788/7792`) e fala o protocolo HONGTAI (bytes idênticos ao Python — há testes);
@@ -19,7 +19,11 @@ Já funciona de ponta a ponta:
 - **letras sincronizadas** (karaokê): busca na **LRCLIB** (`ureq`, sem chave) numa thread, guarda no disco
   (`%APPDATA%\DigooLCD\cache\lyrics`, os mesmos arquivos do app Python) e pinta a linha atual conforme é cantada;
 - **tradução das letras** (opcional): MyMemory (sem chave) ou DeepL (com chave), numa thread e em cache no disco;
-  ligue com `DIGOO_TRADUZIR=pt` (ou en/es/fr/it/de/ja/ko) — `DIGOO_TRADUTOR=deepl` + `DIGOO_DEEPL_KEY=…` usa o DeepL.
+  ligue com `DIGOO_TRADUZIR=pt` (ou en/es/fr/it/de/ja/ko) — `DIGOO_TRADUTOR=deepl` + `DIGOO_DEEPL_KEY=…` usa o DeepL;
+- **fontes de mídia**: toca **vídeo/GIF** já convertido (`digoo-lcd video <arquivo.djf>` — o Python prepara o `.djf`
+  com ffmpeg, o núcleo só lê e manda os quadros prontos, já girados e 4:2:0), mostra **imagem**
+  (`digoo-lcd img <arquivo> [cover|contain]`, JPEG/PNG) e **espelha a tela** (`digoo-lcd espelho [cover|contain]`,
+  captura por GDI a ~12 q/s).
 
 ### Medições (nesta máquina)
 | | app Python (bandeja) | núcleo Rust |
@@ -35,7 +39,9 @@ minúscula. O `sensorhelper.exe` (C#) é o mesmo nos dois (~37 MB), custo compar
 ## Falta (roadmap)
 1. **Tema Música completo** (feito): os 14 modelos, a capa de álbum real, as letras sincronizadas com cache em
    disco e a tradução (MyMemory/DeepL). Falta só a tradução pela IA (Claude) e as "cores automáticas" da capa.
-2. Biblioteca online (GIF/figurinhas/anime), vídeo/GIF e espelho de tela.
+2. **Vídeo/GIF, imagem e espelho de tela** (feito): o núcleo lê o `.djf` pronto, mostra imagens e espelha a tela.
+   Falta só a **biblioteca online** (GIPHY/Tenor/anime/Wikimedia/Workshop) — mas isso é da GUI, que baixa os
+   arquivos que o núcleo então toca.
 3. Interface de configuração (provável: egui, leve) — ou manter a interface Python falando com este núcleo
    (por ora a tradução é ligada por variável de ambiente até isso existir).
 4. Resolução/giro adaptáveis a outras telas.
@@ -45,7 +51,7 @@ O app Python continua sendo o completo e estável; este núcleo é a fundação 
 ## Compilar / rodar
 ```
 cargo test            # testes do protocolo
-cargo build --release # gera target/release/digoo-lcd.exe (~784 KB)
+cargo build --release # gera target/release/digoo-lcd.exe (~2,9 MB)
 target/release/digoo-lcd.exe
 ```
 Precisa de Rust (edition 2021) e, para os sensores, do `sensorhelper.exe` ao lado do exe

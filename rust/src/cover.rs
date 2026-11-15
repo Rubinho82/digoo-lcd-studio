@@ -56,6 +56,12 @@ struct Rgb {
     px: Vec<u8>,
 }
 
+/// Decodifica um arquivo de imagem (JPEG/PNG) em (largura, altura, RGB). Usado pelas fontes de mídia.
+pub fn load_rgb(path: &str) -> Option<(usize, usize, Vec<u8>)> {
+    let img = decode(path)?;
+    Some((img.w, img.h, img.px))
+}
+
 /// Lê o arquivo e decodifica pelo formato detectado nos primeiros bytes (JPEG ou PNG).
 fn decode(path: &str) -> Option<Rgb> {
     let bytes = std::fs::read(path).ok()?;

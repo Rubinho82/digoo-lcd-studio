@@ -290,7 +290,7 @@ impl Translator {
     }
 
     /// Tradução da letra atual (None = desligada, sem letra, traduzindo ainda, ou já no idioma).
-    pub fn for_lyrics(&self, lyr: Option<&Lyric>, media: Option<&MediaSnapshot>) -> Option<Translation> {
+    pub fn for_lyrics(&self, lyr: Option<&Lyric>, _media: Option<&MediaSnapshot>) -> Option<Translation> {
         if !self.cfg.enabled {
             return None;
         }

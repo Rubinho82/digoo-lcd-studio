@@ -3,6 +3,7 @@
 
 mod cover;
 mod lyrics;
+mod media;
 mod panel;
 mod protocol;
 mod render;
@@ -75,6 +76,26 @@ fn main() {
     let rotation = 90u32;
     let max_kb = info.max_frame_kb();
 
+    // modos de mídia (não usam sensores): video <.djf> | img <arquivo> [cover|contain] | espelho [cover|contain]
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(|s| s.as_str()) {
+        Some("video") => {
+            run_video(&mut pan, args.get(2).map(|s| s.as_str()).unwrap_or(""), info.max_fps());
+            return;
+        }
+        Some("img") | Some("imagem") => {
+            let fit = args.get(3).map(|s| s.as_str()).unwrap_or("cover");
+            run_image(&mut pan, args.get(2).map(|s| s.as_str()).unwrap_or(""), fit, rotation, max_kb);
+            return;
+        }
+        Some("espelho") | Some("mirror") => {
+            let fit = args.get(2).map(|s| s.as_str()).unwrap_or("cover");
+            run_mirror(&mut pan, fit, rotation, max_kb, info.max_fps());
+            return;
+        }
+        _ => {}
+    }
+
     // tema: argumento (ex. `digoo-lcd neon`, ou `digoo-lcd musica-vinil` p/ o tema Música)
     let arg = std::env::args().nth(1).unwrap_or_else(|| "aneis".into());
     let is_music = arg == "musica" || arg.starts_with("musica-");
@@ -140,28 +161,106 @@ fn main() {
         } else {
             render::render_theme(&fonts, pal, &theme, &m, &hist)
         };
-        let mut quality = 92u8;
-        let jpeg = loop {
-            let j = render::to_jpeg(&pm, rotation, quality);
-            if j.len() <= (max_kb as usize) * 1024 || quality <= 60 {
-                break j;
-            }
-            quality -= 8;
-        };
-        if let Err(e) = pan.send_frame(&jpeg) {
-            eprintln!("falha ao enviar quadro: {e} — tentando destravar");
-            pan.recover();
-        }
-        pan.keepalive(false);
-
-        frames += 1;
-        if frames % 10 == 0 {
-            let secs = started.elapsed().as_secs_f32();
-            eprintln!("{frames} quadros, {:.1} q/s, último {} KB", frames as f32 / secs, jpeg.len() / 1024);
-        }
-        if frames % 30 == 0 {
-            trim_memory(); // devolve memória ociosa de tempos em tempos
-        }
+        let jpeg = encode_fit(&pm, rotation, max_kb);
+        pump(&mut pan, &jpeg, &mut frames, started);
         std::thread::sleep(period); // 500 ms nos painéis; ~40 ms (25 q/s) na música
+    }
+}
+
+/// Comprime o Pixmap em JPEG girando `rotation`, baixando a qualidade até caber no limite da tela.
+fn encode_fit(pm: &tiny_skia::Pixmap, rotation: u32, max_kb: u32) -> Vec<u8> {
+    let mut quality = 92u8;
+    loop {
+        let j = render::to_jpeg(pm, rotation, quality);
+        if j.len() <= (max_kb as usize) * 1024 || quality <= 60 {
+            break j;
+        }
+        quality -= 8;
+    }
+}
+
+/// Envia um quadro (destrava se falhar), faz o keepalive e devolve memória de tempos em tempos.
+fn pump(pan: &mut panel::Panel, jpeg: &[u8], frames: &mut u64, started: Instant) {
+    if let Err(e) = pan.send_frame(jpeg) {
+        eprintln!("falha ao enviar quadro: {e} — tentando destravar");
+        pan.recover();
+    }
+    pan.keepalive(false);
+    *frames += 1;
+    if *frames % 10 == 0 {
+        let secs = started.elapsed().as_secs_f32().max(0.001);
+        eprintln!("{} quadros, {:.1} q/s, último {} KB", frames, *frames as f32 / secs, jpeg.len() / 1024);
+    }
+    if *frames % 30 == 0 {
+        trim_memory();
+    }
+}
+
+/// Toca um .djf (vídeo/GIF já convertido): os quadros vêm girados e 4:2:0, manda os bytes como estão.
+fn run_video(pan: &mut panel::Panel, path: &str, max_fps: u32) {
+    let mut ff = match media::FrameFile::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("não abri o vídeo {path}: {e}");
+            std::process::exit(2);
+        }
+    };
+    println!("vídeo: {} quadros, {} fps, rot {}°, {:.1}s (loop)", ff.len(), ff.fps, ff.rot, ff.duration);
+    let fps = ff.fps.max(1).min(max_fps.max(1) as u16) as u64;
+    let period = Duration::from_millis((1000 / fps).max(1));
+    pan.keepalive(true);
+    let (mut frames, started) = (0u64, Instant::now());
+    let mut idx = usize::MAX;
+    loop {
+        let t = started.elapsed().as_secs_f32() % ff.duration.max(0.001);
+        let i = ff.index_at(t);
+        if i != idx {
+            idx = i;
+            match ff.read(i) {
+                Ok(jpeg) => pump(pan, &jpeg, &mut frames, started),
+                Err(e) => eprintln!("falha ao ler quadro {i}: {e}"),
+            }
+        } else {
+            pan.keepalive(false); // mesmo quadro: só mantém a tela viva
+        }
+        std::thread::sleep(period);
+    }
+}
+
+/// Mostra uma imagem estática (JPEG/PNG) ajustada a 480×480, reenviando de tempos em tempos.
+fn run_image(pan: &mut panel::Panel, path: &str, fit: &str, rotation: u32, max_kb: u32) {
+    let pm = match media::image_pixmap(path, fit) {
+        Some(p) => p,
+        None => {
+            eprintln!("não abri a imagem {path} (uso JPEG/PNG)");
+            std::process::exit(2);
+        }
+    };
+    println!("imagem: {path} ({fit})");
+    let jpeg = encode_fit(&pm, rotation, max_kb);
+    pan.keepalive(true);
+    let (mut frames, started) = (0u64, Instant::now());
+    loop {
+        pump(pan, &jpeg, &mut frames, started); // reenvia (barato) p/ sobreviver a glitches da tela
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+}
+
+/// Espelha a tela principal (captura GDI → 480×480) a ~12 q/s.
+fn run_mirror(pan: &mut panel::Panel, fit: &str, rotation: u32, max_kb: u32, max_fps: u32) {
+    println!("espelho da tela ({fit})");
+    let fps = max_fps.clamp(1, 12) as u64;
+    let period = Duration::from_millis((1000 / fps).max(1));
+    pan.keepalive(true);
+    let (mut frames, started) = (0u64, Instant::now());
+    loop {
+        match media::mirror_pixmap(fit) {
+            Some(pm) => {
+                let jpeg = encode_fit(&pm, rotation, max_kb);
+                pump(pan, &jpeg, &mut frames, started);
+            }
+            None => pan.keepalive(false),
+        }
+        std::thread::sleep(period);
     }
 }
