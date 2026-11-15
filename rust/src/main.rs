@@ -83,7 +83,12 @@ fn main() {
         }
     };
 
-    let renderer = render::Renderer::new();
+    // tema: argumento (ex. `digoo-lcd neon`) ou "aneis"
+    let theme = std::env::args().nth(1).unwrap_or_else(|| "aneis".into());
+    let theme = if render::THEMES.contains(&theme.as_str()) { theme } else { "aneis".into() };
+    println!("tema: {theme}");
+    let fonts = render::Fonts::load();
+    let pal = render::Palette::default();
     pan.keepalive(true);
 
     let mut frames = 0u64;
@@ -97,7 +102,7 @@ fn main() {
                 d
             }
         };
-        let pm = renderer.render(&m);
+        let pm = render::render_theme(&fonts, pal, &theme, &m);
         let mut quality = 92u8;
         let jpeg = loop {
             let j = render::to_jpeg(&pm, rotation, quality);
