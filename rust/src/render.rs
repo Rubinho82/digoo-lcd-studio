@@ -1571,6 +1571,7 @@ pub struct MusicCtx<'a> {
     pub viz: &'a AudioViz,
     pub media: Option<&'a MediaSnapshot>,
     pub wave: &'a str,
+    pub anim: f32, // segundos contínuos (p/ carretéis, ondas, giros)
 }
 impl<'a> MusicCtx<'a> {
     fn has(&self) -> bool {
@@ -1721,20 +1722,250 @@ fn layout_neon(c: &mut Canvas, x: &MusicCtx) {
     x.progress(c, 40.0, W - 40.0, 430.0, true);
 }
 
-/// Temas de música (modelos de music.py). Capa/vinil usam nota no lugar da arte (lote futuro).
-pub const MUSIC_LAYOUTS: &[&str] = &["capa", "vinil", "cartao", "minimal", "espectro", "neon"];
+/// Linha poligonal (AA) — usada pelas ondas.
+fn poly_line(c: &mut Canvas, pts: &[(f32, f32)], col: Color, width: f32) {
+    if pts.len() < 2 {
+        return;
+    }
+    let mut pb = PathBuilder::new();
+    pb.move_to(pts[0].0, pts[0].1);
+    for p in &pts[1..] {
+        pb.line_to(p.0, p.1);
+    }
+    c.stroke(pb, col, width, true);
+}
+
+/// Máximo de uma fatia das bandas (agrupa 48 bandas em menos colunas, p/ aparelho/pixel).
+fn band_group(viz: &AudioViz, i: usize, per: usize, caps: bool) -> f32 {
+    let src = if caps { &viz.caps } else { &viz.bands };
+    (0..per).map(|k| src[i * per + k]).fold(0.0f32, f32::max)
+}
+
+/// Fita cassete: os carretéis giram e a fita passa de um lado p/ o outro com o tempo da música.
+fn layout_cassete(c: &mut Canvas, x: &MusicCtx) {
+    let pal = c.pal;
+    c.round_rect(28.0, 60.0, W - 56.0, 270.0, 24.0, Some(Color::from_rgba8(36, 36, 42, 255)), Some((Color::from_rgba8(78, 78, 90, 255), 3.0)));
+    for (sx, sy) in [(44.0, 76.0), (W - 44.0, 76.0), (44.0, 314.0), (W - 44.0, 314.0)] {
+        c.disc(sx, sy, 6.0, Color::from_rgba8(90, 90, 100, 255)); // parafusos
+    }
+    c.round_rect(56.0, 84.0, W - 112.0, 122.0, 10.0, Some(Color::from_rgba8(242, 234, 214, 255)), None);
+    c.rrect(56.0, 170.0, W - 112.0, 10.0, rgba(pal.acc, 255));
+    c.rrect(56.0, 182.0, W - 112.0, 8.0, rgba(pal.acc2, 255));
+    let title = ellipsize(c, &x.title(), 26.0, true, W - 140.0);
+    c.text(&title, 240.0, 122.0, 26.0, rgb(40, 36, 44), true, Anchor::Center);
+    let artist = ellipsize(c, &x.artist(), 18.0, false, W - 140.0);
+    c.text(&artist, 240.0, 152.0, 18.0, rgb(90, 84, 90), false, Anchor::Center);
+    c.text("A", 70.0, 106.0, 20.0, rgb(40, 36, 44), true, Anchor::Center);
+    c.round_rect(118.0, 214.0, W - 236.0, 76.0, 36.0, Some(Color::from_rgba8(16, 16, 20, 255)), Some((Color::from_rgba8(70, 70, 80, 255), 2.0)));
+    let dur = x.media.map_or(0.0, |m| m.duration);
+    let p = if dur > 0.0 { (x.media.unwrap().position / dur) as f32 } else { 0.3 };
+    let playing = x.media.map_or(false, |m| m.status == "Playing");
+    let ang0 = if playing { (x.anim * 120.0) % 360.0 } else { 0.0 };
+    for (cx, amount, sign) in [(176.0f32, 1.0 - p, 1.0f32), (304.0, p, -1.0)] {
+        let cy = 252.0;
+        let rt = 16.0 + 20.0 * amount; // carretel enche conforme a fita passa
+        c.disc(cx, cy, rt, Color::from_rgba8(74, 48, 34, 255));
+        c.disc(cx, cy, 15.0, Color::from_rgba8(235, 235, 240, 255));
+        for s in 0..6 {
+            let a = (ang0 * sign + s as f32 * 60.0).to_radians();
+            c.line(cx + 5.0 * a.cos(), cy + 5.0 * a.sin(), cx + 13.0 * a.cos(), cy + 13.0 * a.sin(), Color::from_rgba8(60, 60, 66, 255), 3.0);
+        }
+    }
+    c.polygon(&[(130.0, 330.0), (150.0, 300.0), (W - 150.0, 300.0), (W - 130.0, 330.0)], Some(Color::from_rgba8(52, 52, 60, 255)), None);
+    draw_spectrum(c, x.viz, if x.wave == "circulo" { "barras" } else { x.wave }, (350.0, 418.0, 30.0, W - 30.0), None);
+    x.progress(c, 30.0, W - 30.0, 430.0, true);
+    x.app_line(c, 240.0, 466.0, Anchor::Center, 16.0);
+}
+
+/// Aparelho de som: visor fluorescente (VFD) + equalizador de LEDs verde/amarelo/vermelho.
+fn layout_aparelho(c: &mut Canvas, x: &MusicCtx) {
+    let vfd = rgb(90, 255, 225);
+    c.round_rect(8.0, 8.0, W - 16.0, H - 16.0, 26.0, Some(Color::from_rgba8(14, 14, 17, 255)), Some((Color::from_rgba8(60, 60, 68, 255), 3.0)));
+    c.round_rect(24.0, 24.0, W - 48.0, 100.0, 10.0, Some(Color::from_rgba8(4, 16, 18, 255)), Some((Color::from_rgba8(30, 60, 60, 255), 2.0)));
+    let title = ellipsize(c, &x.title().to_uppercase(), 34.0, true, W - 80.0);
+    c.text_mono(&title, 240.0, 62.0, 34.0, vfd, Anchor::Center);
+    let artist = ellipsize(c, &x.artist().to_uppercase(), 22.0, false, W - 80.0);
+    c.text_mono(&artist, 240.0, 104.0, 22.0, mix(vfd, rgb(0, 0, 0), 0.35), Anchor::Center);
+    let (cols, rows) = (16usize, 14i32);
+    let (gx0, gx1, gy0, gy1) = (30.0f32, W - 30.0, 146.0f32, 402.0f32);
+    let cw = (gx1 - gx0) / cols as f32;
+    let rh = (gy1 - gy0) / rows as f32;
+    let per = 48 / cols;
+    for i in 0..cols {
+        let lit = (band_group(x.viz, i, per, false) * rows as f32).round() as i32;
+        let capr = ((band_group(x.viz, i, per, true) * rows as f32).round() as i32).min(rows - 1);
+        for r in 0..rows {
+            let col = if r < 8 { rgb(40, 230, 90) } else if r < 11 { rgb(255, 210, 40) } else { rgb(255, 60, 50) };
+            let on = r < lit || (r == capr && capr > 0);
+            let y1 = gy1 - r as f32 * rh;
+            c.rrect(gx0 + i as f32 * cw + 3.0, y1 - rh + 3.0, cw - 6.0, rh - 4.0, rgba(col, if on { 255 } else { 34 }));
+        }
+    }
+    let dur = x.media.map_or(0.0, |m| m.duration);
+    let pos = x.media.map_or(0.0, |m| m.position);
+    let tm = if x.has() && dur > 0.0 { format!("{} / {}", fmt_time(pos), fmt_time(dur)) } else { "--:--".to_string() };
+    c.text_mono(&tm, 34.0, 446.0, 26.0, vfd, Anchor::Left);
+    if x.has() {
+        let app = app_name(&x.media.unwrap().app).to_uppercase();
+        let dim = mix(vfd, rgb(0, 0, 0), 0.3);
+        c.text_mono(&app, W - 34.0, 446.0, 22.0, dim, Anchor::Right);
+        let ix = W - 34.0 - app.chars().count() as f32 * 22.0 * 0.55 - 26.0; // ▶ / ❚❚ (a fonte do visor não tem)
+        if x.media.unwrap().status == "Playing" {
+            c.fill_tri((ix, 427.0), (ix + 14.0, 436.0), (ix, 445.0), dim);
+        } else {
+            c.rrect(ix, 427.0, 4.0, 18.0, dim);
+            c.rrect(ix + 9.0, 427.0, 4.0, 18.0, dim);
+        }
+    }
+}
+
+/// Videogame 8-bit: desenhado em 160×160 e ampliado sem suavizar, nas 4 cores de portátil antigo.
+fn layout_pixel(c: &mut Canvas, x: &MusicCtx) {
+    const S: i32 = 160;
+    let gb = [rgb(15, 56, 15), rgb(48, 98, 48), rgb(139, 172, 15), rgb(155, 188, 15)];
+    let mut sm = Pixmap::new(S as u32, S as u32).unwrap();
+    px_rect(&mut sm, 0, 0, S, S, gb[3]);
+    px_rect(&mut sm, 2, 2, S - 4, 1, gb[0]);
+    px_rect(&mut sm, 2, S - 3, S - 4, 1, gb[0]);
+    px_rect(&mut sm, 2, 2, 1, S - 4, gb[0]);
+    px_rect(&mut sm, S - 3, 2, 1, S - 4, gb[0]);
+    px_rect(&mut sm, 8, 8, 40, 40, gb[1]); // "capa" (sem arte → nota)
+    blit_text(&mut sm, &c.f.sym, "\u{266a}", 28.0, 36.0, 24.0, gb[3], Anchor::Center);
+    let title = ellipsize(c, &x.title(), 11.0, false, (S - 62) as f32);
+    blit_text(&mut sm, &c.f.mono, &title, 54.0, 20.0, 11.0, gb[0], Anchor::Left);
+    let artist = ellipsize(c, &x.artist(), 9.0, false, (S - 62) as f32);
+    blit_text(&mut sm, &c.f.mono, &artist, 54.0, 32.0, 9.0, gb[1], Anchor::Left);
+    if x.has() {
+        let st = if x.media.unwrap().status == "Playing" { "> PLAY" } else { "|| PAUSE" };
+        blit_text(&mut sm, &c.f.mono, st, 54.0, 44.0, 9.0, gb[0], Anchor::Left);
+    }
+    let (cols, base, top) = (16usize, 128i32, 58i32);
+    let per = 48 / cols;
+    for i in 0..cols {
+        let blocks = (band_group(x.viz, i, per, false) * (base - top) as f32 / 4.0).round() as i32;
+        let x0 = 9 + i as i32 * 9;
+        for k in 0..blocks {
+            px_rect(&mut sm, x0, base - k * 4 - 3, 6, 2, if k < 9 { gb[0] } else { gb[1] });
+        }
+    }
+    let dur = x.media.map_or(0.0, |m| m.duration);
+    let pos = x.media.map_or(0.0, |m| m.position);
+    if x.has() && dur > 0.0 {
+        let n = (26.0 * pos / dur) as i32;
+        for k in 0..26 {
+            px_rect(&mut sm, 9 + k * 5 + 1, 136, 2, 3, if k <= n { gb[0] } else { gb[2] });
+        }
+        blit_text(&mut sm, &c.f.mono, &fmt_time(pos), 9.0, 150.0, 9.0, gb[0], Anchor::Left);
+        blit_text(&mut sm, &c.f.mono, &fmt_time(dur), (S - 9) as f32, 150.0, 9.0, gb[0], Anchor::Right);
+    }
+    blit_scaled(&mut c.pm, &sm, 3);
+}
+
+/// Ondas suaves: quatro senoides que se cruzam, cada uma puxada por uma faixa do som.
+fn layout_ondas(c: &mut Canvas, x: &MusicCtx) {
+    let pal = c.pal;
+    let b = &x.viz.bands;
+    let low = b[..8].iter().sum::<f32>() / 8.0;
+    let mid = b[8..24].iter().sum::<f32>() / 16.0;
+    let high = b[24..].iter().sum::<f32>() / 24.0;
+    let waves = [
+        (low, 1.1f32, 1.6f32, pal.acc),
+        (mid, 1.9, -2.2, pal.acc2),
+        (high, 2.8, 2.9, mix(pal.acc, pal.acc2, 0.5)),
+        ((low + mid) / 2.0, 1.5, -1.2, pal.txt),
+    ];
+    let cy = 250.0f32;
+    for (amt, freq, speed, col) in waves {
+        let amp = 14.0 + 120.0 * (amt * 1.4).min(1.0);
+        let mut pts = Vec::new();
+        let mut px = 0.0;
+        while px <= W {
+            let env = (std::f32::consts::PI * px / W).sin().powi(2);
+            pts.push((px, cy + amp * env * (freq * 2.0 * std::f32::consts::PI * px / W + x.anim * speed).sin()));
+            px += 6.0;
+        }
+        poly_line(c, &pts, rgba(col, 40), 12.0);
+        poly_line(c, &pts, rgba(col, 230), 3.0);
+    }
+    if x.has() {
+        let s = ellipsize(c, &x.title(), 38.0, true, W - 40.0);
+        c.glow_text(&s, 240.0, 80.0, 38.0, pal.txt, Anchor::Center);
+    } else {
+        x.t(c, 240.0, 80.0, &x.title(), 34.0, pal.txt, true, Anchor::Center, W - 40.0);
+    }
+    x.t(c, 240.0, 120.0, &x.artist(), if x.has() { 22.0 } else { 16.0 }, pal.acc, false, Anchor::Center, W - 40.0);
+    x.progress(c, 40.0, W - 40.0, 428.0, true);
+}
+
+/// Rádio antigo: dial de frequência que anda com a música, alto-falante pulsando com o grave.
+fn layout_radio(c: &mut Canvas, x: &MusicCtx) {
+    let wood = rgb(92, 58, 34);
+    c.round_rect(20.0, 40.0, W - 40.0, H - 80.0, 30.0, Some(wood), Some((Color::from_rgba8(60, 36, 20, 255), 6.0)));
+    c.round_rect(44.0, 64.0, W - 88.0, 106.0, 14.0, Some(Color::from_rgba8(236, 214, 160, 255)), None);
+    for i in 0..=20 {
+        let xx = 64.0 + i as f32 * (W - 128.0) / 20.0; // escala do dial
+        let y1 = if i % 5 == 0 { 128.0 } else { 160.0 };
+        c.line(xx, 140.0, xx, y1, Color::from_rgba8(80, 60, 40, 255), 2.0);
+    }
+    let dur = x.media.map_or(0.0, |m| m.duration);
+    let frac = if dur > 0.0 { (x.media.unwrap().position / dur) as f32 } else { 0.5 };
+    let nx = 64.0 + frac * (W - 128.0);
+    c.line(nx, 74.0, nx, 162.0, Color::from_rgba8(200, 30, 30, 255), 4.0);
+    x.t(c, 240.0, 106.0, &x.title(), 28.0, rgb(60, 40, 25), true, Anchor::Center, W - 120.0);
+    x.t(c, 240.0, 130.0, &x.artist(), 18.0, rgb(100, 75, 50), false, Anchor::Center, W - 120.0);
+    let (cx, cy) = (160.0f32, 300.0f32); // alto-falante pulsando com o grave
+    let r = 92.0 + x.viz.bass * 10.0;
+    c.disc(cx, cy, r, Color::from_rgba8(40, 26, 16, 255));
+    for k in 0..5 {
+        let rr = r - 10.0 - k as f32 * 16.0;
+        if rr > 4.0 {
+            c.circle(cx, cy, rr, None, Some((Color::from_rgba8(110, 80, 50, 255), 3.0)));
+        }
+    }
+    if x.wave != "off" {
+        draw_bars(c, x.viz, 380.0, 420.0, "barras", 230.0, W - 50.0, false);
+    }
+    x.app_line(c, 370.0, 225.0, Anchor::Center, 16.0);
+}
+
+/// Polaroide: a "foto" numa moldura instantânea, título escrito embaixo (sem giro no núcleo Rust).
+fn layout_polaroid(c: &mut Canvas, x: &MusicCtx) {
+    let pal = c.pal;
+    let (cw, ch) = (290.0f32, 340.0f32);
+    let (cx0, cy0) = ((W - cw) / 2.0, 30.0f32);
+    c.rrect(cx0 + 8.0, cy0 + 10.0, cw, ch, Color::from_rgba8(0, 0, 0, 90)); // sombra
+    c.rrect(cx0, cy0, cw, ch, rgb(245, 242, 236));
+    c.rrect(cx0 + 20.0, cy0 + 20.0, 250.0, 250.0, rgba(pal.acc, 255)); // "foto" (sem capa → acento)
+    c.text_sym("\u{266b}", cx0 + 145.0, cy0 + 165.0, 90.0, Color::from_rgba8(255, 255, 255, 210), Anchor::Center);
+    let title = ellipsize(c, &x.title(), 26.0, true, 260.0);
+    c.text(&title, cx0 + 145.0, cy0 + 300.0, 26.0, rgb(40, 40, 46), true, Anchor::Center);
+    x.t(c, 240.0, 416.0, &x.artist(), if x.has() { 24.0 } else { 16.0 }, pal.txt, false, Anchor::Center, W - 40.0);
+    x.progress(c, 50.0, W - 50.0, 434.0, false);
+    draw_spectrum(c, x.viz, if x.wave == "circulo" { "onda" } else { x.wave }, (444.0, 476.0, 8.0, W - 8.0), None);
+}
+
+/// Temas de música (modelos de music.py + music_extra.py). Sem capa de álbum ainda → nota ♫.
+pub const MUSIC_LAYOUTS: &[&str] = &[
+    "capa", "vinil", "cartao", "minimal", "espectro", "neon", "cassete", "aparelho", "pixel", "ondas", "radio", "polaroid",
+];
 
 /// Renderiza o tema Música no modelo `layout` com o estilo de onda `wave`.
-pub fn render_music(fonts: &Fonts, pal: Palette, layout: &str, viz: &AudioViz, media: Option<&MediaSnapshot>, wave: &str) -> Pixmap {
+pub fn render_music(fonts: &Fonts, pal: Palette, layout: &str, viz: &AudioViz, media: Option<&MediaSnapshot>, wave: &str, anim: f32) -> Pixmap {
     let mut c = Canvas::new(fonts, pal);
     c.fill(rgb(8, 8, 12));
-    let ctx = MusicCtx { viz, media, wave };
+    let ctx = MusicCtx { viz, media, wave, anim };
     match layout {
         "capa" => layout_capa(&mut c, &ctx),
         "vinil" => layout_vinil(&mut c, &ctx),
         "cartao" => layout_cartao(&mut c, &ctx),
         "minimal" => layout_minimal(&mut c, &ctx),
         "neon" => layout_neon(&mut c, &ctx),
+        "cassete" => layout_cassete(&mut c, &ctx),
+        "aparelho" => layout_aparelho(&mut c, &ctx),
+        "pixel" => layout_pixel(&mut c, &ctx),
+        "ondas" => layout_ondas(&mut c, &ctx),
+        "radio" => layout_radio(&mut c, &ctx),
+        "polaroid" => layout_polaroid(&mut c, &ctx),
         _ => layout_espectro(&mut c, &ctx),
     }
     c.pm
@@ -1763,14 +1994,14 @@ mod tests {
             title: "Blinding Lights".into(), artist: "The Weeknd".into(), album: String::new(),
             status: "Playing".into(), app: "Spotify.exe".into(), position: 83.0, duration: 200.0,
         };
-        let waves = ["circulo", "circulo", "barras", "onda", "barras", "onda"];
+        let waves = ["circulo", "circulo", "barras", "onda", "barras", "onda", "barras", "barras", "barras", "onda", "barras", "onda"];
         let cols = 3u32;
         let rows = (MUSIC_LAYOUTS.len() as u32 + cols - 1) / cols;
         let (sheet_w, sheet_h) = (cols * 480, rows * 480);
         let mut sheet = Pixmap::new(sheet_w, sheet_h).unwrap();
         sheet.fill(rgb(40, 40, 40));
         for (i, layout) in MUSIC_LAYOUTS.iter().enumerate() {
-            let pm = render_music(&fonts, pal, layout, &viz, Some(&media), waves[i]);
+            let pm = render_music(&fonts, pal, layout, &viz, Some(&media), waves[i % waves.len()], 1.3);
             let (ox, oy) = ((i as u32 % cols) * 480, (i as u32 / cols) * 480);
             let (pw, sdata, ddata) = (pm.width(), pm.data(), sheet.data_mut());
             for y in 0..480u32 {

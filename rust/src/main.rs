@@ -123,7 +123,7 @@ fn main() {
             let audio = sensors.as_ref().and_then(|s| s.audio_snapshot());
             viz.update(audio.as_ref(), dt);
             let media = sensors.as_ref().and_then(|s| s.media_snapshot());
-            render::render_music(&fonts, pal, &music_layout, &viz, media.as_ref(), "circulo")
+            render::render_music(&fonts, pal, &music_layout, &viz, media.as_ref(), "circulo", started.elapsed().as_secs_f32())
         } else {
             render::render_theme(&fonts, pal, &theme, &m, &hist)
         };
