@@ -92,10 +92,11 @@ fn main() {
     pan.keepalive(true);
 
     let mut hist = render::History::default();
+    let mut net = sensors::NetCounter::new();
     let mut frames = 0u64;
     let started = Instant::now();
     loop {
-        let m = match &sensors {
+        let mut m = match &sensors {
             Some(s) => s.snapshot(),
             None => {
                 let mut d = sensors::Metrics::default();
@@ -103,6 +104,10 @@ fn main() {
                 d
             }
         };
+        // rede não vem do helper C# (igual ao psutil no Python): mede aqui a cada quadro.
+        let (down, up) = net.sample();
+        m.net_down = down;
+        m.net_up = up;
         hist.push(&m);
         let pm = render::render_theme(&fonts, pal, &theme, &m, &hist);
         let mut quality = 92u8;

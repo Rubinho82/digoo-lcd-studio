@@ -545,6 +545,18 @@ fn metric_val(m: &Metrics, key: &str) -> f32 {
         "cpu_load" => m.cpu_load,
         "gpu_load" => m.gpu_load,
         "ram_load" => m.ram_load,
+        "cpu_clock" => m.cpu_clock,
+        "cpu_power" => m.cpu_power,
+        "gpu_hotspot" => m.gpu_hotspot,
+        "gpu_clock" => m.gpu_clock,
+        "gpu_power" => m.gpu_power,
+        "gpu_vram" => m.gpu_vram,
+        "gpu_fan" => m.gpu_fan,
+        "disk_temp" => m.disk_temp,
+        "net_down" => m.net_down,
+        "net_up" => m.net_up,
+        "pump_rpm" => m.pump_rpm,
+        "fan_rpm" => m.fan_rpm,
         _ => f32::NAN,
     }
 }
@@ -559,30 +571,46 @@ fn metric_unit(key: &str) -> &'static str {
         "cpu_power" | "gpu_power" => "W",
         "gpu_vram" => "GB",
         "net_down" | "net_up" => "MB/s",
+        "pump_rpm" | "fan_rpm" | "gpu_fan" => "RPM",
         _ => "",
     }
 }
 
-/// Valor formatado (só o número) ou "--" quando a métrica ainda não é coletada.
+/// Valor formatado (só o número) ou "--" quando ausente, já na escala da unidade:
+/// clock MHz→GHz, VRAM MB→GB, rede B/s→MB/s; o resto (°C, %, W, RPM) é inteiro.
 fn metric_value_str(m: &Metrics, key: &str) -> String {
     let v = metric_val(m, key);
     if v.is_nan() {
-        "--".into()
-    } else {
-        format!("{:.0}", v)
+        return "--".into();
+    }
+    match key {
+        k if k.ends_with("clock") => format!("{:.1}", v / 1000.0),
+        "gpu_vram" => format!("{:.1}", v / 1024.0),
+        "net_down" | "net_up" => format!("{:.1}", v / 1_048_576.0),
+        _ => format!("{:.0}", v),
     }
 }
 
-/// Fração 0..1 da métrica (NaN se ausente): temperatura em 20..95 °C, resto é valor/100.
+/// Fração 0..1 da métrica p/ barras/anéis (NaN = sem barra): temperatura 20..95 °C; carga/RAM = v/100;
+/// VRAM = usada/total; rede em escala log (1 B/s … 1 GB/s); clock/potência/RPM não têm barra.
 fn metric_frac(m: &Metrics, key: &str) -> f32 {
     let v = metric_val(m, key);
     if v.is_nan() {
         return f32::NAN;
     }
-    if key.ends_with("temp") {
-        temp_frac(v)
-    } else {
-        (v / 100.0).clamp(0.0, 1.0)
+    match key {
+        k if k.ends_with("temp") || k == "gpu_hotspot" => temp_frac(v),
+        "cpu_load" | "gpu_load" | "ram_load" => (v / 100.0).clamp(0.0, 1.0),
+        "gpu_vram" => {
+            let t = m.gpu_vram_total;
+            if t.is_nan() || t <= 0.0 {
+                f32::NAN
+            } else {
+                (v / t).clamp(0.0, 1.0)
+            }
+        }
+        "net_down" | "net_up" => (v.max(1.0).log10() / 9.0).clamp(0.0, 1.0),
+        _ => f32::NAN,
     }
 }
 
@@ -603,6 +631,7 @@ fn hist_of<'h>(h: &'h History, key: &str) -> &'h [f32] {
         "gpu_temp" => &h.gpu_temp,
         "gpu_load" => &h.gpu_load,
         "ram_load" => &h.ram_load,
+        "net_down" => &h.net_down,
         _ => &[],
     }
 }
@@ -635,6 +664,7 @@ pub struct History {
     pub cpu_temp: Vec<f32>,
     pub gpu_temp: Vec<f32>,
     pub ram_load: Vec<f32>,
+    pub net_down: Vec<f32>,
 }
 impl Default for History {
     fn default() -> Self {
@@ -644,6 +674,7 @@ impl Default for History {
             cpu_temp: Vec::new(),
             gpu_temp: Vec::new(),
             ram_load: Vec::new(),
+            net_down: Vec::new(),
         }
     }
 }
@@ -655,6 +686,7 @@ impl History {
         push_cap(&mut self.cpu_temp, m.cpu_temp);
         push_cap(&mut self.gpu_temp, m.gpu_temp);
         push_cap(&mut self.ram_load, m.ram_load);
+        push_cap(&mut self.net_down, m.net_down);
     }
 }
 fn push_cap(buf: &mut Vec<f32>, v: f32) {
@@ -778,7 +810,7 @@ fn theme_velocimetro(c: &mut Canvas, m: &Metrics) {
         c.text(&pct(load), cx, cy + 58.0, 34.0, pal.txt, true, Anchor::Center);
         c.value_unit(cx, cy + 128.0, &temp_str(temp), "°C", 52.0, temp_color(temp, &pal), Anchor::Center);
     }
-    c.text(&format!("RAM {}   ·   REDE {}", pct(m.ram_load), fmt_rate(f32::NAN)), W / 2.0, 452.0, 22.0, pal.muted, false, Anchor::Center);
+    c.text(&format!("RAM {}   ·   REDE {}", pct(m.ram_load), fmt_rate(m.net_down)), W / 2.0, 452.0, 22.0, pal.muted, false, Anchor::Center);
 }
 
 fn theme_graficos(c: &mut Canvas, m: &Metrics, hist: &History) {
@@ -876,9 +908,9 @@ fn theme_terminal(c: &mut Canvas, m: &Metrics) {
         format!("CPU   {:>4}°  {:>5}", temp_str(m.cpu_temp), pct(m.cpu_load)),
         format!("GPU   {:>4}°  {:>5}", temp_str(m.gpu_temp), pct(m.gpu_load)),
         format!("RAM   {:>11}", pct(m.ram_load)),
-        format!("VRAM  {:>8} GB", "--"), // sensores extras chegam no lote 2
-        format!("CLK   {:>8} GHz", "--"),
-        format!("PWR   {:>9} W", "--"),
+        format!("VRAM  {:>8} GB", metric_value_str(m, "gpu_vram")),
+        format!("CLK   {:>8} GHz", metric_value_str(m, "cpu_clock")),
+        format!("PWR   {:>9} W", metric_value_str(m, "cpu_power")),
         String::new(),
         if blink { "> _".to_string() } else { ">".to_string() },
     ];
@@ -932,17 +964,16 @@ fn theme_hud(c: &mut Canvas, m: &Metrics) {
     }
     hud_panel(c, 16.0, 306.0, W - 16.0, 464.0, cya);
     let rows = [
-        ("RAM", format!("{} %", num(m.ram_load)), !m.ram_load.is_nan()),
-        ("VRAM", "-- GB".to_string(), false),
-        ("REDE", "-- MB/s".to_string(), false),
+        ("RAM", format!("{} %", num(m.ram_load)), metric_frac(m, "ram_load")),
+        ("VRAM", format!("{} GB", metric_value_str(m, "gpu_vram")), metric_frac(m, "gpu_vram")),
+        ("REDE", format!("{} MB/s", metric_value_str(m, "net_down")), metric_frac(m, "net_down")),
     ];
-    for (i, (label, val, has_bar)) in rows.iter().enumerate() {
+    for (i, (label, val, frac)) in rows.iter().enumerate() {
         let y = 340.0 + i as f32 * 42.0;
         c.text(label, 36.0, y, 22.0, cya, true, Anchor::Left);
         c.text(val, W - 36.0, y, 22.0, rgb(255, 255, 255), true, Anchor::Right);
-        if *has_bar {
-            let frac = (m.ram_load / 100.0).clamp(0.0, 1.0);
-            c.bar(130.0, y - 4.0, 200.0, 8.0, frac, yel);
+        if !frac.is_nan() {
+            c.bar(130.0, y - 4.0, 200.0, 8.0, frac.clamp(0.0, 1.0), yel);
         }
     }
 }
@@ -956,7 +987,7 @@ fn theme_barras(c: &mut Canvas, m: &Metrics) {
         ("CPU", m.cpu_load, m.cpu_temp, true, pal.acc),
         ("GPU", m.gpu_load, m.gpu_temp, true, pal.acc2),
         ("RAM", m.ram_load, f32::NAN, false, rgb(120, 230, 140)),
-        ("VRAM", f32::NAN, f32::NAN, false, rgb(255, 190, 60)),
+        ("VRAM", metric_frac(m, "gpu_vram") * 100.0, f32::NAN, false, rgb(255, 190, 60)),
     ];
     let (bw, gap, top, bottom) = (84.0f32, 28.0f32, 120.0f32, 400.0f32);
     let x0 = (W - (4.0 * bw + 3.0 * gap)) / 2.0;
@@ -1355,10 +1386,28 @@ mod tests {
     use crate::sensors::Metrics;
 
     #[test]
+    fn net_counter_reads() {
+        // valida o FFI do GetIfTable (offsets/stride) com interfaces reais: taxa finita e plausível.
+        let mut nc = crate::sensors::NetCounter::new();
+        let _ = nc.sample();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (d, u) = nc.sample();
+        println!("rede medida: down={:.2} KB/s  up={:.2} KB/s", d / 1024.0, u / 1024.0);
+        assert!(!d.is_infinite() && !u.is_infinite(), "taxa infinita");
+        assert!(d.is_nan() || (0.0..5.0e9).contains(&d), "download absurdo: {d}");
+        assert!(u.is_nan() || (0.0..5.0e9).contains(&u), "upload absurdo: {u}");
+    }
+
+    #[test]
     fn dump_sheet() {
         let fonts = Fonts::load();
         let pal = Palette::default();
-        let m = Metrics { cpu_temp: 61.0, gpu_temp: 54.0, cpu_load: 34.0, gpu_load: 72.0, ram_load: 48.0 };
+        let m = Metrics {
+            cpu_temp: 61.0, gpu_temp: 54.0, cpu_load: 34.0, gpu_load: 72.0, ram_load: 48.0,
+            cpu_clock: 5225.0, cpu_power: 72.8, gpu_hotspot: 64.0, gpu_clock: 2722.0, gpu_power: f32::NAN,
+            gpu_vram: 3720.0, gpu_vram_total: 12227.0, gpu_fan: 1600.0, disk_temp: 44.0,
+            net_down: 2_400_000.0, net_up: 350_000.0, pump_rpm: 2200.0, fan_rpm: 1290.0,
+        };
         // histórico sintético p/ enxergar as sparklines do tema "graficos"
         let mut hist = History::default();
         for i in 0..120 {
@@ -1368,6 +1417,7 @@ mod tests {
             hist.cpu_temp.push(58.0 + 8.0 * (t * 0.12).sin());
             hist.gpu_temp.push(52.0 + 6.0 * (t * 0.09 + 2.0).sin());
             hist.ram_load.push(46.0 + 12.0 * (t * 0.07 + 0.5).sin());
+            hist.net_down.push((1.5e6 + 1.4e6 * (t * 0.2).sin()).max(0.0));
         }
         // grade cols x rows com todos os temas
         let cols = 3u32;
