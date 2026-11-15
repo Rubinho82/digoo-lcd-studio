@@ -91,6 +91,7 @@ fn main() {
     let pal = render::Palette::default();
     pan.keepalive(true);
 
+    let mut hist = render::History::default();
     let mut frames = 0u64;
     let started = Instant::now();
     loop {
@@ -102,7 +103,8 @@ fn main() {
                 d
             }
         };
-        let pm = render::render_theme(&fonts, pal, &theme, &m);
+        hist.push(&m);
+        let pm = render::render_theme(&fonts, pal, &theme, &m, &hist);
         let mut quality = 92u8;
         let jpeg = loop {
             let j = render::to_jpeg(&pm, rotation, quality);
