@@ -104,8 +104,8 @@ pub fn mtime() -> Option<SystemTime> {
     std::fs::metadata(config_path()).and_then(|m| m.modified()).ok()
 }
 
-/// Lê e valida o config.json (ausente/corrompido → padrão). Chave DeepL cifrada (DPAPI) não é lida aqui —
-/// use a variável de ambiente DIGOO_DEEPL_KEY para o DeepL até o núcleo decifrar o DPAPI.
+/// Lê e valida o config.json (ausente/corrompido → padrão). A chave DeepL vem cifrada com DPAPI (escopo do
+/// usuário) e é decifrada aqui; a variável DIGOO_DEEPL_KEY continua valendo como override no main.
 pub fn load() -> Config {
     let mut cfg: Config = std::fs::read_to_string(config_path())
         .ok()
@@ -115,9 +115,78 @@ pub fn load() -> Config {
         cfg.mode = "painel".into();
     }
     if cfg.deepl_key.starts_with("dpapi:") {
-        cfg.deepl_key.clear(); // cifrada pela GUI; sem DPAPI ainda, não dá p/ usar
+        cfg.deepl_key = dpapi_unprotect(&cfg.deepl_key).unwrap_or_default();
     }
     cfg
+}
+
+// ----------------------------------------------------------------------
+// DPAPI: decifra as chaves de API que a GUI grava cifradas ("dpapi:" + base64). Só decifra o que o MESMO
+// usuário no MESMO PC cifrou (CryptProtectData, escopo do usuário) — mesmo esquema do config.py.
+// ----------------------------------------------------------------------
+#[repr(C)]
+struct DataBlob {
+    cb: u32,
+    pb: *mut u8,
+}
+#[link(name = "crypt32")]
+extern "system" {
+    fn CryptUnprotectData(
+        data_in: *const DataBlob,
+        descr: *mut *mut u16,
+        entropy: *const DataBlob,
+        reserved: *const core::ffi::c_void,
+        prompt: *const core::ffi::c_void,
+        flags: u32,
+        data_out: *mut DataBlob,
+    ) -> i32;
+}
+#[link(name = "kernel32")]
+extern "system" {
+    fn LocalFree(p: *mut u8) -> *mut u8;
+}
+
+fn dpapi_unprotect(token: &str) -> Option<String> {
+    let raw = base64_decode(token.strip_prefix("dpapi:")?)?;
+    if raw.is_empty() {
+        return None;
+    }
+    unsafe {
+        let in_blob = DataBlob { cb: raw.len() as u32, pb: raw.as_ptr() as *mut u8 };
+        let mut out = DataBlob { cb: 0, pb: std::ptr::null_mut() };
+        let ok = CryptUnprotectData(&in_blob, std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, &mut out);
+        if ok == 0 || out.pb.is_null() {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(out.pb, out.cb as usize).to_vec();
+        LocalFree(out.pb);
+        String::from_utf8(bytes).ok()
+    }
+}
+
+/// base64 padrão → bytes (ignora padding e quebras de linha). None se houver caractere inválido.
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut table = [255u8; 256];
+    for (i, c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().enumerate() {
+        table[*c as usize] = i as u8;
+    }
+    let (mut out, mut buf, mut bits) = (Vec::new(), 0u32, 0u32);
+    for &c in s.as_bytes() {
+        if c == b'=' || c == b'\n' || c == b'\r' {
+            continue;
+        }
+        let v = table[c as usize];
+        if v == 255 {
+            return None;
+        }
+        buf = (buf << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 fn hex(s: &str, fallback: Color) -> Color {
@@ -242,6 +311,23 @@ mod tests {
         assert!(!in_minutes(&cfg, 12 * 60));
         cfg.night_enabled = false;
         assert!(!in_minutes(&cfg, 23 * 60 + 30));
+    }
+
+    #[test]
+    fn dpapi_do_config() {
+        // DIGOO_TEST_DPAPI=1 → confere que a chave DeepL do config real decifra (mostra só o tamanho, sem vazar)
+        if std::env::var("DIGOO_TEST_DPAPI").is_ok() {
+            let cfg = load();
+            println!("deepl_key: {} chars, ainda cifrada={}", cfg.deepl_key.len(), cfg.deepl_key.starts_with("dpapi:"));
+        }
+    }
+
+    #[test]
+    fn base64_decodifica() {
+        assert_eq!(base64_decode("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(base64_decode("SGVsbG8gV29ybGQ=").unwrap(), b"Hello World");
+        assert!(base64_decode("").unwrap().is_empty());
+        assert!(base64_decode("@@@").is_none());
     }
 
     // versão testável de in_night_window com a hora injetada

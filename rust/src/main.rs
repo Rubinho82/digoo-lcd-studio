@@ -276,6 +276,35 @@ fn is_image(path: &str) -> bool {
     [".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"].iter().any(|e| p.ends_with(e))
 }
 
+fn is_video(path: &str) -> bool {
+    let p = path.to_lowercase();
+    [".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".flv", ".ogv"].iter().any(|e| p.ends_with(e))
+}
+
+/// Em modo mídia: se a 1ª fonte for um vídeo já convertido (.djf no cache do app Python), devolve o quadro
+/// do momento (JPEG pronto, já girado). Mantém o FrameFile aberto entre voltas; reabre se a fonte mudar.
+fn play_config_video(state: &mut Option<(String, media::FrameFile, Instant)>, cfg: &config::Config) -> Option<Vec<u8>> {
+    let src = cfg.media_paths.iter().find(|p| is_video(p))?;
+    if state.as_ref().map_or(true, |(s, _, _)| s != src) {
+        let djf = media::djf_cache_path(src, &cfg.media_fit, cfg.rotation.rem_euclid(360) as u32)?;
+        if !djf.exists() {
+            *state = None;
+            return None; // a GUI ainda não converteu este vídeo
+        }
+        match media::FrameFile::open(djf.to_str()?) {
+            Ok(ff) => *state = Some((src.clone(), ff, Instant::now())),
+            Err(_) => {
+                *state = None;
+                return None;
+            }
+        }
+    }
+    let (_, ff, start) = state.as_mut()?;
+    let t = start.elapsed().as_secs_f32() % ff.duration.max(0.001);
+    let i = ff.index_at(t);
+    ff.read(i).ok()
+}
+
 /// Lê os sensores + a rede (igual ao laço de temas) num Metrics.
 fn read_metrics(sensors: &Option<sensors::Sensors>, net: &mut sensors::NetCounter) -> sensors::Metrics {
     let mut m = match sensors {
@@ -327,6 +356,7 @@ fn run_config(pan: &mut panel::Panel, info: &protocol::PanelInfo) {
     let mut net = sensors::NetCounter::new();
     let mut viz = render::AudioViz::new();
     let mut image_cache: Option<(String, String, tiny_skia::Pixmap)> = None;
+    let mut video: Option<(String, media::FrameFile, Instant)> = None;
     let mut bright: i32 = -1;
     println!("modo config.json ({}): {}", config::config_path().display(), describe(&cfg));
     pan.keepalive(true);
@@ -360,8 +390,19 @@ fn run_config(pan: &mut panel::Panel, info: &protocol::PanelInfo) {
         let max_kb = if cfg.max_kb > 0 { cfg.max_kb as u32 } else { info.max_frame_kb() };
         let period = Duration::from_millis((1000 / cfg.fps.clamp(1, 30) as u64).max(1));
 
-        // em modo mídia: 1ª imagem tocável da lista. Vídeo (o núcleo não decodifica) → cai no tema/música
-        // configurado, que é o que a sobreposição pretende mostrar (use `video <.djf>` p/ tocar vídeo pronto).
+        // vídeo do config já convertido (.djf no cache do app Python): tem prioridade, vai com os bytes prontos
+        if cfg.mode == "midia" {
+            if let Some(jpeg) = play_config_video(&mut video, &cfg) {
+                pump(pan, &jpeg, &mut frames, started);
+                std::thread::sleep(period);
+                continue;
+            }
+        } else {
+            video = None;
+        }
+
+        // em modo mídia: 1ª imagem tocável. Vídeo ainda não convertido pela GUI → cai no tema/música do config
+        // (o que a sobreposição pretende mostrar); vídeo pronto já foi tratado acima.
         let media_img = if cfg.mode == "midia" {
             cfg.media_paths.iter().find(|p| is_image(p) && std::path::Path::new(p.as_str()).exists()).cloned()
         } else {

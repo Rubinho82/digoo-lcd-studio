@@ -77,6 +77,16 @@ impl FrameFile {
     }
 }
 
+/// Caminho do .djf que o app Python gera p/ este vídeo/GIF (mesmo sha1 do videocache.py:
+/// `resolve|tamanho|mtime_ns|fit|rot|92|v3`). O arquivo pode não existir ainda (a GUI é quem converte).
+pub fn djf_cache_path(src: &str, fit: &str, rotation: u32) -> Option<std::path::PathBuf> {
+    let meta = std::fs::metadata(src).ok()?;
+    let mtime_ns = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    let raw = format!("{}|{}|{}|{}|{}|92|v3", src, meta.len(), mtime_ns, fit, rotation % 360);
+    let dir = crate::lyrics::cache_dir().parent()?.join("video");
+    Some(dir.join(format!("{}.djf", &crate::lyrics::sha1_hex(&raw)[..24])))
+}
+
 // ----------------------------------------------------------------------
 // imagem estática e espelho → Pixmap 480×480 (o main gira 90° e comprime como nos temas)
 // ----------------------------------------------------------------------
@@ -308,6 +318,14 @@ mod tests {
         assert_eq!(ff.index_at(99.0), 2); // passou do fim → último
         assert_eq!(ff.read(1).unwrap(), frames[1]); // bytes exatos do 2º quadro
         assert!((ff.duration - 0.3).abs() < 0.01); // 200 ms + 1 quadro a 10 fps
+    }
+
+    #[test]
+    fn djf_cache_path_do_env() {
+        // rode com DIGOO_TEST_VIDEO=<caminho> p/ conferir o hash contra o do Python (senão não faz nada)
+        if let Ok(p) = std::env::var("DIGOO_TEST_VIDEO") {
+            println!("djf cache p/ {p}: {:?}", djf_cache_path(&p, "cover", 90));
+        }
     }
 
     #[test]

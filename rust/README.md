@@ -3,7 +3,7 @@
 Reescrita da **parte quente** do Digoo LCD Studio em Rust, focada em **pouca memória e velocidade**
 (a mesma ideia que a Discord usou: reescrever o que roda o tempo todo, não o app inteiro de uma vez).
 
-## Estado: fase 6 (dirigido pelo config.json da GUI — temas, música, mídia, espelho)
+## Estado: fase 7 (dirigido pelo config.json — temas, música, mídia/vídeo, espelho)
 
 Já funciona de ponta a ponta:
 - acha a tela pelo USB (`33c3:7791/7788/7792`) e fala o protocolo HONGTAI (bytes idênticos ao Python — há testes);
@@ -26,9 +26,10 @@ Já funciona de ponta a ponta:
   captura por GDI a ~12 q/s);
 - **dirigido pelo `config.json`** (sem argumento, só `digoo-lcd`): lê o que a GUI escreve em
   `%APPDATA%\DigooLCD\config.json` e **segue ao vivo** — modo (painel/mídia/espelho), tema ou música, cores,
-  giro, FPS, brilho (com agenda noturna) e tradução; quando a GUI salva, o núcleo relê e troca na hora. (Em
-  mídia toca imagens — vídeo cai no tema/música configurado, use `video <.djf>` p/ tocar vídeo; espelho = monitor
-  principal; a chave do DeepL no config fica cifrada por DPAPI, então para o DeepL use `DIGOO_DEEPL_KEY` por ora.)
+  giro, FPS, brilho (com agenda noturna) e tradução; quando a GUI salva, o núcleo relê e troca na hora. (Em mídia
+  toca imagens e também o **vídeo** do config quando o app Python já o converteu — acha o `.djf` no cache pelo
+  mesmo hash; a chave do **DeepL** vem decifrada do config (DPAPI), e `DIGOO_DEEPL_KEY` ainda vale como override.
+  Espelho = monitor principal.)
 
 ### Medições (nesta máquina)
 | | app Python (bandeja) | núcleo Rust |
@@ -47,9 +48,9 @@ minúscula. O `sensorhelper.exe` (C#) é o mesmo nos dois (~37 MB), custo compar
 2. **Vídeo/GIF, imagem e espelho de tela** (feito): o núcleo lê o `.djf` pronto, mostra imagens e espelha a tela.
    Falta só a **biblioteca online** (GIPHY/Tenor/anime/Wikimedia/Workshop) — mas isso é da GUI, que baixa os
    arquivos que o núcleo então toca.
-3. **A interface Python fala com o núcleo** (feito): ele lê o `config.json` e segue ao vivo. Falta: decifrar as
-   chaves de API (DPAPI) do config, tocar vídeo direto do config (resolver o `.djf` do cache) e espelhar outros
-   monitores além do principal. Uma GUI própria em egui continua opcional.
+3. **A interface Python fala com o núcleo** (feito): lê o `config.json` ao vivo, decifra a chave do DeepL (DPAPI)
+   e toca o vídeo do config achando o `.djf` que a GUI preparou. Falta espelhar outros monitores além do principal
+   (e decifrar as demais chaves, que só a GUI usa). Uma GUI própria em egui continua opcional.
 4. Resolução/giro adaptáveis a outras telas.
 
 O app Python continua sendo o completo e estável; este núcleo é a fundação da versão enxuta.
